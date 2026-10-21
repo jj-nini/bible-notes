@@ -7,6 +7,12 @@
 - **MSG·AMP 한글 번역**: DB를 먼저 찾고, 없을 때만 기계 번역(Google) 후 `machine`으로 저장. **확정 저장**하면 `fixed`, 직접 수정도 가능
 - 런타임에 LLM 없음. 주제 사전과 구절 태그는 설계 단계에서 미리 만들어 DB에 넣음
 
+## 문서
+
+- [개발 저널](docs/journal/00-overview.md): 왜 그렇게 결정했는지, 선택지 비교, 디버깅 과정, 배운 것
+- [PRD · TRD](docs/prd-trd.md): 요구사항과 기술 설계, 변경 이력
+- 서비스: [jj-nini.github.io/bible-notes](https://jj-nini.github.io/bible-notes/)
+
 ## 바로 실행 (샘플 데이터)
 
 ```bash
