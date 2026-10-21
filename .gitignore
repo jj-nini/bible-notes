@@ -1,0 +1,21 @@
+node_modules
+dist
+.env
+.env.local
+*.log
+# Full scripture data must never be committed (copyright); keep it in Supabase only
+data/private/
+
+# Supabase CLI link state (project ref, org id)
+supabase/.temp/
+supabase/.branches/
+
+# Never commit credentials, even by accident
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*service-account*.json
+*serviceaccount*.json
+*-credentials.json
