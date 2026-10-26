@@ -1,3 +1,4 @@
+import { applyResult } from "../lib/memorize";
 import {
   sampleMachineTranslations,
   sampleSynonyms,
@@ -6,9 +7,10 @@ import {
   sampleVerses,
   sampleVersions,
 } from "./sample";
-import { type EngineChoice, type Repo, type Translation, type VerseRef, refKey, sameRef, trKey } from "./types";
+import { type EngineChoice, type MemoryPassage, type Repo, type Translation, type VerseRef, refKey, sameRef, trKey } from "./types";
 
 const STORE_KEY = "bible-notes:sample-translations:v2";
+const MEMORY_KEY = "bible-notes:sample-memory:v1";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** One row per verse per engine, like the DB. */
 const rowKey = (t: Translation) => `${trKey(t.version, t)}|${t.engine}`;
@@ -18,6 +20,16 @@ const SAMPLE_ENGINE: Record<EngineChoice, { name: string; prefix: string }> = {
   "google-v2": { name: "google-v2", prefix: "[v2] " },
   claude: { name: "claude-sonnet-5-5", prefix: "[Claude] " },
 };
+
+function loadMemory(): MemoryPassage[] {
+  try {
+    const raw = localStorage.getItem(MEMORY_KEY);
+    if (raw) return JSON.parse(raw) as MemoryPassage[];
+  } catch {
+    /* storage unavailable */
+  }
+  return [];
+}
 
 /** Translation "DB" for sample mode, kept in this browser's localStorage. */
 function loadStore(): Map<string, Translation> {
@@ -41,6 +53,14 @@ export function createLocalRepo(): Repo {
     }
   };
   const missLog: string[] = [];
+  let memory = loadMemory();
+  const persistMemory = () => {
+    try {
+      localStorage.setItem(MEMORY_KEY, JSON.stringify(memory));
+    } catch {
+      /* ignore */
+    }
+  };
 
   return {
     mode: "local",
@@ -131,6 +151,27 @@ export function createLocalRepo(): Repo {
       const t: Translation = { version, book, chapter, verse, text, status: "fixed", edited: true, engine: "manual" };
       store.set(rowKey(t), t);
       persist();
+    },
+    async listMemoryPassages() {
+      return memory.map((p) => ({ ...p }));
+    },
+    async saveMemoryPassage({ id, ref, body }) {
+      const old = id ? memory.find((p) => p.id === id) : undefined;
+      if (id && !old) throw new Error("암송 본문을 찾을 수 없습니다");
+      const p: MemoryPassage = old
+        ? { ...old, ref, body, misses: old.body === body ? old.misses : {} }
+        : { id: crypto.randomUUID(), ref, body, correct: 0, wrong: 0, misses: {}, created_at: new Date().toISOString() };
+      memory = old ? memory.map((x) => (x.id === id ? p : x)) : [...memory, p];
+      persistMemory();
+      return { ...p };
+    },
+    async deleteMemoryPassage(id) {
+      memory = memory.filter((p) => p.id !== id);
+      persistMemory();
+    },
+    async recordMemoryResult(id, ok, hit, miss) {
+      memory = memory.map((p) => (p.id === id ? applyResult(p, ok, hit, miss) : p));
+      persistMemory();
     },
   };
 }

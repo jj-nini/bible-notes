@@ -66,6 +66,19 @@ export interface TopicHit extends VerseRef {
   tags: Record<string, number>;
 }
 
+/** A passage I typed in to memorize (my own copy; never shipped with the app). */
+export interface MemoryPassage {
+  id: string;
+  /** My label, e.g. "빌립보서 4:6-7". */
+  ref: string;
+  body: string;
+  correct: number;
+  wrong: number;
+  /** Word position → how many times I missed it (goes down when I get it right). */
+  misses: Record<string, number>;
+  created_at: string;
+}
+
 export interface Repo {
   mode: "local" | "supabase";
   listVersions(): Promise<Version[]>;
@@ -92,6 +105,13 @@ export interface Repo {
   unfixTranslation(version: string, ref: VerseRef, engine: string): Promise<void>;
   /** Saves my own text as the confirmed translation (engine "manual"). */
   saveTranslationEdit(version: string, ref: VerseRef, text: string): Promise<void>;
+
+  listMemoryPassages(): Promise<MemoryPassage[]>;
+  /** Adds (no id) or edits a passage. Changing the body clears its weak-word counts. */
+  saveMemoryPassage(p: { id?: string; ref: string; body: string }): Promise<MemoryPassage>;
+  deleteMemoryPassage(id: string): Promise<void>;
+  /** One answer: `hit` words were right (their miss counts go down), `miss` words were wrong. */
+  recordMemoryResult(id: string, ok: boolean, hit: number[], miss: number[]): Promise<void>;
 }
 
 export const refKey = (r: VerseRef) => `${r.book}.${r.chapter}.${r.verse}`;

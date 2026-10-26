@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { prepareTranslator } from "../lib/browserTranslator";
 import { translateInChunks } from "../lib/chunkTranslate";
-import type { Repo, Translation, TranslationStatus, Verse, VerseRef, Version } from "./types";
+import type { MemoryPassage, Repo, Translation, TranslationStatus, Verse, VerseRef, Version } from "./types";
 
 interface TranslationRow {
   version: string;
@@ -64,6 +64,8 @@ async function translateInBrowser(sb: SupabaseClient, version: string, refs: Ver
   });
   return made;
 }
+
+const MEMORY_COLS = "id,ref,body,correct,wrong,misses,created_at";
 
 export function createSupabaseRepo(sb: SupabaseClient): Repo {
   return {
@@ -132,6 +134,22 @@ export function createSupabaseRepo(sb: SupabaseClient): Repo {
     },
     async saveTranslationEdit(version, ref, text) {
       check(await sb.rpc("save_manual_translation", { ver: version, b: ref.book, c: ref.chapter, v: ref.verse, txt: text }));
+    },
+    async listMemoryPassages() {
+      return check<MemoryPassage[]>(await sb.from("memory_passages").select(MEMORY_COLS).order("created_at"));
+    },
+    async saveMemoryPassage({ id, ref, body }) {
+      // user_id defaults to auth.uid(); a trigger clears misses when the body changes
+      const q = id
+        ? sb.from("memory_passages").update({ ref, body }).eq("id", id)
+        : sb.from("memory_passages").insert({ ref, body });
+      return check<MemoryPassage>(await q.select(MEMORY_COLS).single());
+    },
+    async deleteMemoryPassage(id) {
+      check(await sb.from("memory_passages").delete().eq("id", id));
+    },
+    async recordMemoryResult(id, ok, hit, miss) {
+      check(await sb.rpc("record_memory_result", { pid: id, ok, hit, miss }));
     },
   };
 }

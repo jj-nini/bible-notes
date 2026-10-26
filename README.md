@@ -5,7 +5,8 @@
 - **성경읽기** (기본 화면): 책·장 이동, 번역본 전환(개역개정 / NIV / MSG / AMP), 대조 보기, 글자 크기
 - **성구찾기**: 주제 검색(동의어 사전 → 주제 → 가중치) / 본문 단어 검색, 결과에서 **읽기모드로 보기**
 - **MSG·AMP 한글 번역**: DB를 먼저 찾고, 없을 때만 기계 번역(Google) 후 `machine`으로 저장. **확정 저장**하면 `fixed`, 직접 수정도 가능
-- 런타임에 LLM 없음. 주제 사전과 구절 태그는 설계 단계에서 미리 만들어 DB에 넣음
+- **암송**: 내가 입력한 본문으로 객관식 문제를 끝없이 만들어 반복(빈칸 · 정확한 본문 · 틀린 곳 찾기 · 이어지는 말 · 첫마디 · 장절), 외워 쓰기는 글자 단위로 채점
+- 런타임에 LLM 없음. 주제 사전과 구절 태그는 설계 단계에서 미리 만들어 DB에 넣음. 암송 문제도 브라우저에서 규칙으로 생성
 
 ## 문서
 
@@ -38,7 +39,8 @@ src/
   lib/
     topicSearch.ts    검색어 → 주제 매칭 (순수 함수)
     translations.tsx  번역 캐시 상태 (DB 우선 → 없으면 일괄 기계 번역)
-  components/         Reader, Search, TranslationBlock, BookPicker, Login, ToTop
+    memorize.ts       암송 문제 생성(토씨·어미 바꾸기)과 외워 쓰기 채점 (순수 함수)
+  components/         Reader, Search, Memorize, TranslationBlock, BookPicker, Login, ToTop
 supabase/
   migrations/         테이블 · RLS · RPC
   functions/translate Google 번역 v3 호출 + machine 저장 (Edge Function)
@@ -128,6 +130,15 @@ node scripts/translate-claude-cli.ts MSG PHP JHN.3  # 일부 책·장만
 
 `.env.local`에 `VITE_TRANSLATOR=chrome`을 넣으면 Chrome 내장 번역(PC Chrome 138+, 키 불필요)을 대신 씁니다.
 
+## 암송
+
+SQL Editor에서 `supabase/migrations/20261026000000_memorize.sql`을 실행합니다.
+
+- **본문 관리**에서 장절과 본문을 직접 입력합니다. 본문은 `memory_passages`에 **입력한 계정만 볼 수 있게** 저장됩니다(RLS).
+- **문제 풀기**: 넣은 본문 전체에서 섞어 냅니다. 틀린 어절은 몇 문제 뒤 다른 형태로 다시 나오고, 자주 틀린 어절과 본문이 더 자주 나옵니다.
+- **외워 쓰기**: 외운 대로 쓰면 글자 단위로 비교합니다. 띄어쓰기와 문장부호는 채점하지 않습니다.
+- 오답 보기는 규칙으로 만듭니다(조사 `께↔에게`, 어미 `하라↔하리라`, 높임 `하시고↔하고`, 헷갈리는 낱말, 빠뜨린 어절, 순서 바뀜). 외부 AI로 본문을 보내지 않습니다.
+
 ## GitHub Pages 배포
 
 1. GitHub에 저장소를 만들고 push합니다.
@@ -144,3 +155,4 @@ node scripts/translate-claude-cli.ts MSG PHP JHN.3  # 일부 책·장만
 - 전체 본문은 **Supabase에만** 넣고 저장소에는 올리지 않습니다 (`data/private/`는 `.gitignore` 처리됨).
 - `src/data/sample/`에는 화면 확인용으로 10개 구절이 들어 있습니다. 공개 저장소에 올리기 전에 유지할지 정하세요.
 - 접근은 `app_users`에 등록한 계정으로만 제한됩니다.
+- 암송 본문은 사용자가 직접 입력해 **자기 계정에만** 저장합니다. 저장소에도, 외부 서비스에도 가지 않습니다.

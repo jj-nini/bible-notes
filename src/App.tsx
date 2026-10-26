@@ -4,12 +4,13 @@ import { repo, supabase } from "./data";
 import type { VerseRef, Version } from "./data/types";
 import { Login } from "./components/Login";
 import { ReaderToolbar, ReaderView } from "./components/Reader";
+import { MemorizeBar, MemorizeView, type MemoMode } from "./components/Memorize";
 import { SearchBar, SearchView } from "./components/Search";
 import { ToTop } from "./components/ToTop";
 import { useToast } from "./lib/toast";
 import { loadReader, saveReader, type ReaderState, type SearchMode, type SearchQuery } from "./lib/state";
 
-type Tab = "read" | "search";
+type Tab = "read" | "search" | "memo";
 type User = { id: string; email: string | null };
 
 export default function App() {
@@ -36,6 +37,9 @@ function Main({ user }: { user: User | null }) {
   const [mode, setMode] = useState<SearchMode>("topic");
   const [query, setQuery] = useState<SearchQuery | null>(null);
   const [randomNonce, setRandomNonce] = useState(0);
+  const [memoMode, setMemoMode] = useState<MemoMode>("drill");
+  const [memoSeen, setMemoSeen] = useState(false);
+  useEffect(() => { if (tab === "memo") setMemoSeen(true); }, [tab]);
 
   useEffect(() => {
     repo.listVersions().then((vs) => {
@@ -84,6 +88,7 @@ function Main({ user }: { user: User | null }) {
               <nav className="nav-tabs" role="tablist" aria-label="메뉴">
                 <button type="button" role="tab" aria-selected={tab === "read"} onClick={() => openTab("read")}>성경읽기</button>
                 <button type="button" role="tab" aria-selected={tab === "search"} onClick={() => openTab("search")}>성구찾기</button>
+                <button type="button" role="tab" aria-selected={tab === "memo"} onClick={() => openTab("memo")}>암송</button>
               </nav>
             </div>
             <div className="brand-right">
@@ -94,9 +99,9 @@ function Main({ user }: { user: User | null }) {
               )}
             </div>
           </div>
-          {tab === "read"
-            ? <ReaderToolbar state={reader} versions={versions} onChange={patchReader} />
-            : <SearchBar q={q} mode={mode} onQ={setQ} onSubmit={submit} />}
+          {tab === "read" ? <ReaderToolbar state={reader} versions={versions} onChange={patchReader} />
+            : tab === "search" ? <SearchBar q={q} mode={mode} onQ={setQ} onSubmit={submit} />
+            : <MemorizeBar mode={memoMode} onMode={setMemoMode} />}
         </div>
       </header>
 
@@ -116,6 +121,12 @@ function Main({ user }: { user: User | null }) {
               onRead={readFromSearch}
             />
           </div>
+          {/* Mounted on first visit only, then kept so an unfinished drill survives tab switches */}
+          {(tab === "memo" || memoSeen) && (
+            <div hidden={tab !== "memo"}>
+              <MemorizeView mode={memoMode} active={tab === "memo"} onMode={setMemoMode} />
+            </div>
+          )}
         </main>
         <footer>
           {repo.mode === "local"

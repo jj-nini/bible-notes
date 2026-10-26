@@ -171,4 +171,59 @@ describe("app (sample mode)", () => {
     await waitFor(() => expect(within(row("Claude")).getByText("확정됨")).toBeTruthy());
     expect(within(v4).getAllByText("확정됨")).toHaveLength(1); // the v2 one went back to machine
   });
+
+  it("memorize: drills come from passages I typed in, and writing from memory is graded letter by letter", async () => {
+    const record = vi.spyOn(repo, "recordMemoryResult");
+    const user = userEvent.setup();
+    setup();
+    await screen.findByRole("heading", { name: "빌립보서 4장" });
+    await user.click(screen.getByRole("tab", { name: "암송" }));
+    expect(await screen.findByText("외울 말씀이 아직 없습니다.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "본문 넣기" }));
+
+    const add = async (ref: string, body: string) => {
+      await user.type(screen.getByLabelText("장절"), ref);
+      await user.type(screen.getByLabelText("본문"), body);
+      await user.click(screen.getByRole("button", { name: "추가" }));
+      expect(await screen.findByRole("heading", { name: ref })).toBeTruthy();
+    };
+    await add("요한복음 3:16", "하나님이 세상을 이처럼 사랑하사 독생자를 주셨으니 이는 그를 믿는 자마다 멸망하지 않고 영생을 얻게 하려 하심이라");
+    await add("빌립보서 4:6", "아무 것도 염려하지 말고 다만 모든 일에 기도와 간구로, 너희 구할 것을 감사함으로 하나님께 아뢰라.");
+    expect(screen.getByText("개 본문 · 문제는 전체에서 섞여 나옵니다", { exact: false })).toBeTruthy();
+
+    // A question with one choice marked right after answering
+    await user.click(screen.getByRole("button", { name: "문제 풀기" }));
+    const quiz = await screen.findByRole("region", { name: "문제" });
+    const first = within(quiz).getAllByRole("button")[0];
+    await user.click(first);
+    expect(await within(quiz).findByText(/^(정답|오답)/)).toBeTruthy();
+    expect(quiz.querySelectorAll(".right")).toHaveLength(1);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".drill-stats")!.textContent).toMatch(/^1문제/);
+    await user.click(within(quiz).getByRole("button", { name: "다음 문제" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: "문제" }).querySelector(".feedback")).toBeNull());
+
+    // Write from memory: spacing and punctuation don't count, one particle does
+    await user.click(screen.getByRole("button", { name: "외워 쓰기" }));
+    await user.selectOptions(screen.getByLabelText("외울 본문"), screen.getByRole("option", { name: "빌립보서 4:6" }));
+    const box = screen.getByLabelText(/외운 대로 쓰세요/);
+    await user.type(box, "아무것도 염려하지 말고 다만 모든 일에 기도와 간구로 너희 구할 것을 감사함으로 하나님께 아뢰라");
+    await user.click(screen.getByRole("button", { name: "채점" }));
+    expect(await screen.findByText("토씨 하나 틀리지 않았습니다")).toBeTruthy();
+    await user.clear(box);
+    await user.type(box, "아무 것도 염려하지 말고 다만 모든 일에 기도와 간구로 너희 구할 것을 감사함으로 하나님에게 아뢰라");
+    await user.click(screen.getByRole("button", { name: "채점" }));
+    expect(await screen.findByText("15어절 중 1어절이 다릅니다")).toBeTruthy();
+    expect(document.querySelector(".diff del")!.textContent).toBe("에게");
+    expect(document.querySelector(".diff ins")!.textContent).toBe("께");
+    expect(record).toHaveBeenLastCalledWith(expect.any(String), false, expect.any(Array), [13]);
+
+    // The missed word shows up in the passage list; deleting asks once more
+    await user.click(screen.getByRole("button", { name: "본문 관리" }));
+    const item = (await screen.findByRole("heading", { name: "빌립보서 4:6" })).closest("article")!;
+    expect(within(item).getByText("하나님께")).toBeTruthy();
+    await user.click(within(item).getByRole("button", { name: "삭제" }));
+    await user.click(within(item).getByRole("button", { name: "정말 삭제" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "빌립보서 4:6" })).toBeNull());
+  });
 });
