@@ -67,6 +67,8 @@ export interface TopicHit extends VerseRef {
 }
 
 /** A passage I typed in to memorize (my own copy; never shipped with the app). */
+import type { Variant, VerseProgress } from "../lib/memorize";
+
 export interface MemoryPassage {
   id: string;
   /** My label, e.g. "빌립보서 4:6-7". */
@@ -76,6 +78,10 @@ export interface MemoryPassage {
   wrong: number;
   /** Word position → how many times I missed it (goes down when I get it right). */
   misses: Record<string, number>;
+  /** Verse position → level and counts (see nextProgress in lib/memorize). */
+  progress: Record<string, VerseProgress>;
+  /** Near misses made ahead of time by scripts/memory-variants.ts. */
+  variants: Variant[];
   created_at: string;
 }
 
@@ -110,8 +116,11 @@ export interface Repo {
   /** Adds (no id) or edits a passage. Changing the body clears its weak-word counts. */
   saveMemoryPassage(p: { id?: string; ref: string; body: string }): Promise<MemoryPassage>;
   deleteMemoryPassage(id: string): Promise<void>;
-  /** One answer: `hit` words were right (their miss counts go down), `miss` words were wrong. */
-  recordMemoryResult(id: string, ok: boolean, hit: number[], miss: number[]): Promise<void>;
+  /**
+   * One answer: `hit` words were right (their miss counts go down), `miss` words were wrong.
+   * `verses` it tested move up a level by the rules in lib/memorize; `recall` = typed from memory.
+   */
+  recordMemoryResult(id: string, ok: boolean, hit: number[], miss: number[], verses?: number[], recall?: boolean): Promise<void>;
 }
 
 export const refKey = (r: VerseRef) => `${r.book}.${r.chapter}.${r.verse}`;

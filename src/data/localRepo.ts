@@ -24,7 +24,7 @@ const SAMPLE_ENGINE: Record<EngineChoice, { name: string; prefix: string }> = {
 function loadMemory(): MemoryPassage[] {
   try {
     const raw = localStorage.getItem(MEMORY_KEY);
-    if (raw) return JSON.parse(raw) as MemoryPassage[];
+    if (raw) return (JSON.parse(raw) as MemoryPassage[]).map((p) => ({ ...p, progress: p.progress ?? {}, variants: p.variants ?? [] }));
   } catch {
     /* storage unavailable */
   }
@@ -159,8 +159,8 @@ export function createLocalRepo(): Repo {
       const old = id ? memory.find((p) => p.id === id) : undefined;
       if (id && !old) throw new Error("암송 본문을 찾을 수 없습니다");
       const p: MemoryPassage = old
-        ? { ...old, ref, body, misses: old.body === body ? old.misses : {} }
-        : { id: crypto.randomUUID(), ref, body, correct: 0, wrong: 0, misses: {}, created_at: new Date().toISOString() };
+        ? { ...old, ref, body, ...(old.body === body ? {} : { misses: {}, progress: {}, variants: [] }) }
+        : { id: crypto.randomUUID(), ref, body, correct: 0, wrong: 0, misses: {}, progress: {}, variants: [], created_at: new Date().toISOString() };
       memory = old ? memory.map((x) => (x.id === id ? p : x)) : [...memory, p];
       persistMemory();
       return { ...p };
@@ -169,8 +169,8 @@ export function createLocalRepo(): Repo {
       memory = memory.filter((p) => p.id !== id);
       persistMemory();
     },
-    async recordMemoryResult(id, ok, hit, miss) {
-      memory = memory.map((p) => (p.id === id ? applyResult(p, ok, hit, miss) : p));
+    async recordMemoryResult(id, ok, hit, miss, verses = [], recall = false) {
+      memory = memory.map((p) => (p.id === id ? applyResult(p, ok, hit, miss, verses, recall) : p));
       persistMemory();
     },
   };

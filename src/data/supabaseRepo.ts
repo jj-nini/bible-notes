@@ -65,7 +65,7 @@ async function translateInBrowser(sb: SupabaseClient, version: string, refs: Ver
   return made;
 }
 
-const MEMORY_COLS = "id,ref,body,correct,wrong,misses,created_at";
+const MEMORY_COLS = "id,ref,body,correct,wrong,misses,progress,variants,created_at";
 
 export function createSupabaseRepo(sb: SupabaseClient): Repo {
   return {
@@ -148,8 +148,8 @@ export function createSupabaseRepo(sb: SupabaseClient): Repo {
     async deleteMemoryPassage(id) {
       check(await sb.from("memory_passages").delete().eq("id", id));
     },
-    async recordMemoryResult(id, ok, hit, miss) {
-      check(await sb.rpc("record_memory_result", { pid: id, ok, hit, miss }));
+    async recordMemoryResult(id, ok, hit, miss, verses = [], recall = false) {
+      check(await sb.rpc("record_memory_result", { pid: id, ok, hit, miss, verses, recall }));
     },
   };
 }

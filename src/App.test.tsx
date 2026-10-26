@@ -194,10 +194,11 @@ describe("app (sample mode)", () => {
     // A question with one choice marked right after answering
     await user.click(screen.getByRole("button", { name: "문제 풀기" }));
     const quiz = await screen.findByRole("region", { name: "문제" });
-    const first = within(quiz).getAllByRole("button")[0];
-    await user.click(first);
+    // Tap the first open choice until the question is answered (put-in-order questions take several taps)
+    for (let k = 0; k < 8 && !quiz.querySelector(".feedback"); k++) {
+      await user.click(within(quiz).getAllByRole("button").find((b) => !(b as HTMLButtonElement).disabled)!);
+    }
     expect(await within(quiz).findByText(/^(정답|오답)/)).toBeTruthy();
-    expect(quiz.querySelectorAll(".right")).toHaveLength(1);
     expect(record).toHaveBeenCalledTimes(1);
     expect(document.querySelector(".drill-stats")!.textContent).toMatch(/^1문제/);
     await user.click(within(quiz).getByRole("button", { name: "다음 문제" }));
@@ -216,7 +217,7 @@ describe("app (sample mode)", () => {
     expect(await screen.findByText("15어절 중 1어절이 다릅니다")).toBeTruthy();
     expect(document.querySelector(".diff del")!.textContent).toBe("에게");
     expect(document.querySelector(".diff ins")!.textContent).toBe("께");
-    expect(record).toHaveBeenLastCalledWith(expect.any(String), false, expect.any(Array), [13]);
+    expect(record).toHaveBeenLastCalledWith(expect.any(String), false, expect.any(Array), [13], [], false);
 
     // The missed word shows up in the passage list; deleting asks once more
     await user.click(screen.getByRole("button", { name: "본문 관리" }));
@@ -289,5 +290,35 @@ describe("app (sample mode)", () => {
     await user.click(screen.getByRole("button", { name: "다음 절" }));
     expect(await screen.findByText("3 / 5")).toBeTruthy();
     expect(screen.getByText("2 ✗1")).toBeTruthy();
+  });
+
+  it("memorize levels: a verse at level 4 asks for typed answers, with a first-consonant hint", async () => {
+    const saved = await repo.saveMemoryPassage({ ref: "연습 2장", body: "1 내 친구야 나의 말을 잊지 말고 네 마음에 새기라\n2 그리하면 그것이 너를 지키며 평안을 더하게 하리라" });
+    // Climb both verses to level 4: 5 right, then 80% over 10, then 3 typed right in a row
+    for (let k = 0; k < 10; k++) await repo.recordMemoryResult(saved.id, true, [], [], [0, 1]);
+    for (let k = 0; k < 3; k++) await repo.recordMemoryResult(saved.id, true, [], [], [0, 1], true);
+    const user = userEvent.setup();
+    setup();
+    await screen.findByRole("heading", { name: "빌립보서 4장" });
+    await user.click(screen.getByRole("tab", { name: "암송" }));
+    await user.click(screen.getByRole("button", { name: "본문 관리" }));
+    const item = (await screen.findByRole("heading", { name: "연습 2장" })).closest("article")!;
+    expect(within(item).getByText(/2절 중 2절 암송하기 단계/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "문제 풀기" }));
+    await user.selectOptions(await screen.findByLabelText("문제 범위"), screen.getByRole("option", { name: "연습 2장" }));
+    const quiz = () => screen.getByRole("region", { name: "문제" });
+    for (let k = 0; k < 80 && !within(quiz()).queryByLabelText("답 쓰기"); k++) {
+      for (let t = 0; t < 8 && !quiz().querySelector(".feedback"); t++) {
+        await user.click(within(quiz()).getAllByRole("button").find((b) => !(b as HTMLButtonElement).disabled)!);
+      }
+      await user.click(within(quiz()).getByRole("button", { name: "다음 문제" }));
+    }
+    expect(within(quiz()).getByLabelText("답 쓰기")).toBeTruthy();
+    await user.click(within(quiz()).getByRole("button", { name: "초성 힌트" }));
+    expect(within(quiz()).getByText(/^힌트: [ㄱ-ㅎ]/)).toBeTruthy();
+    await user.click(within(quiz()).getByRole("button", { name: "모르겠어요" }));
+    expect(within(quiz()).getByText(/^오답/)).toBeTruthy();
+    expect(quiz().querySelector(".reveal")!.textContent!.length).toBeGreaterThan(3);
   });
 });

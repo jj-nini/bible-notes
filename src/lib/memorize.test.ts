@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyResult, chunkVerse, gradeRecitation, makeQuestion, norm, seeded, splitVerses, subPassage, tokenize, wordVariants,
-  type DrillPassage, type Question,
+  applyResult, chosung, chunkVerse, gradeRecitation, makeQuestion, nextProgress, norm, seeded, splitVerses, subPassage, tokenize,
+  wordVariants, type DrillPassage, type Question,
 } from "./memorize";
 
 const PHP = "아무 것도 염려하지 말고 다만 모든 일에 기도와 간구로, 너희 구할 것을 감사함으로 하나님께 아뢰라. 그리하면 모든 지각에 뛰어난 하나님의 평강이 그리스도 예수 안에서 너희 마음과 생각을 지키시리라.";
@@ -63,8 +63,14 @@ describe("questions", () => {
       const q = makeQuestion(p, [p1, p2], rng)!;
       expect(q).not.toBeNull();
       kinds.add(q.kind);
-      expect(q.choices.length).toBeGreaterThanOrEqual(3);
       const body = norm(p.body);
+      if (q.kind === "ox") {
+        expect(q.choices).toHaveLength(2);
+        const shown = norm(q.context!.before.replace(/…/g, ""));
+        expect(body.includes(shown)).toBe(q.answer === 0);
+        continue;
+      }
+      expect(q.choices.length).toBeGreaterThanOrEqual(3);
       if (q.order) {
         expect(body).toContain(norm(inOrder(q).join("")));
         continue;
@@ -83,7 +89,8 @@ describe("questions", () => {
       else if (q.kind === "next") expect(body).toContain(norm(q.context!.before + right));
       else expect(body).toContain(norm(right));
     }
-    expect([...kinds].sort()).toEqual(["blank", "chunkOrder", "exact", "first", "next", "ref", "wrong"]);
+    // Level 1 only: nothing to type yet
+    expect([...kinds].sort()).toEqual(["blank", "chunkOrder", "exact", "first", "next", "ox", "ref"]);
   });
 
   it("aims at a word I just missed", () => {
@@ -224,3 +231,111 @@ describe("weak-word counting", () => {
     expect(p).toMatchObject({ correct: 1, wrong: 2, misses: { 2: 1 } });
   });
 });
+
+describe("wrong choices from the chapter itself", () => {
+  const vocab = new Set(tokenize(CHAPTER).map(norm));
+
+  it("blank choices are words of the chapter with the same shape (지키라 ↔ 새기라)", () => {
+    const rng = seeded(21);
+    let fromChapter = 0, total = 0;
+    for (let k = 0; k < 200; k++) {
+      const q = makeQuestion(ch, [ch], rng, undefined, "blank")!;
+      if (q.kind !== "blank") continue;
+      const right = q.choices[q.answer];
+      for (const c of q.choices.filter((_, i) => i !== q.answer)) {
+        total++;
+        if (vocab.has(norm(c))) fromChapter++;
+        expect(right.startsWith(c) && c.length < right.length).toBe(false); // never a bare stem (명령을 → 명령)
+      }
+    }
+    expect(fromChapter / total).toBeGreaterThan(0.9);
+    const q = makeQuestion(ch, [ch], seeded(3), splitVerses(CHAPTER)[0].words.length - 1, "blank")!; // 새기라
+    expect(q.choices[q.answer]).toBe("새기라");
+    expect(q.choices.filter((c) => c !== "새기라").every((c) => /라$/.test(c))).toBe(true);
+  });
+
+  it("uses a prepared (Claude) near miss for that word first", () => {
+    const i = splitVerses(CHAPTER)[0].words.indexOf("새기라");
+    const p = { ...ch, variants: [{ start: i, end: i + 1, text: "간직하라" }] };
+    expect(makeQuestion(p, [p], seeded(1), i, "blank")!.choices).toContain("간직하라");
+  });
+});
+
+describe("levels", () => {
+  it("1 → 2 after 5 right, 2 → 3 at 80% over 10, 3 → 4 after 3 recalls in a row", () => {
+    let pr = nextProgress(undefined, true, false);
+    for (let k = 0; k < 4; k++) pr = nextProgress(pr, true, false);
+    expect(pr.lv).toBe(2);
+    for (let k = 0; k < 3; k++) pr = nextProgress(pr, true, true);
+    pr = nextProgress(pr, false, false);
+    expect(pr).toMatchObject({ lv: 2, r: 8, w: 1 }); // 9 answers: not yet
+    pr = nextProgress(pr, true, false);
+    expect(pr).toMatchObject({ lv: 3, s: 0 }); // the streak from level 2 doesn't carry over
+    pr = nextProgress(nextProgress(pr, true, true), true, true);
+    pr = nextProgress(pr, false, true);
+    pr = nextProgress(nextProgress(nextProgress(pr, true, true), true, true), true, true);
+    expect(pr.lv).toBe(4);
+  });
+
+  it("a verse only gets questions up to its level; level 4 types whole verses", () => {
+    const at = (lv: number) => ({ ...ch, progress: Object.fromEntries(splitVerses(CHAPTER).map((_, i) => [i, { r: 0, w: 0, s: 0, lv }])) });
+    const kindsAt = (lv: number) => {
+      const p = at(lv);
+      const rng = seeded(lv);
+      return new Set(Array.from({ length: 400 }, () => makeQuestion(p, [p], rng)!.kind));
+    };
+    const l1 = kindsAt(1);
+    for (const k of ["wrong", "pair", "bank", "type1", "type", "finish", "quote"]) expect(l1.has(k as never)).toBe(false);
+    const l2 = kindsAt(2);
+    expect(["pair", "bank", "type1"].every((k) => l2.has(k as never))).toBe(true);
+    expect(l2.has("type") || l2.has("finish")).toBe(false);
+    const l4 = kindsAt(4);
+    expect(["type", "finish", "quote"].every((k) => l4.has(k as never))).toBe(true);
+  });
+
+  it("typed, pair and bank questions are built from the text", () => {
+    const p = { ...ch, progress: Object.fromEntries(splitVerses(CHAPTER).map((_, i) => [i, { r: 0, w: 0, s: 0, lv: 4 }])) };
+    const body = norm(CHAPTER.replace(/\d/g, ""));
+    const rng = seeded(5);
+    for (const kind of ["type1", "type", "finish", "quote", "pair", "bank"] as const) {
+      for (let k = 0; k < 40; k++) {
+        const q = makeQuestion(p, [p], rng, undefined, kind)!;
+        if (q.kind !== kind) continue;
+        if (q.input) {
+          expect(body).toContain(norm(q.input.answer));
+          expect(q.input.hint).toMatch(/^[ㄱ-ㅎ\s/…]+$/);
+          expect(q.words.map((w) => tokenize(CHAPTER)[w]).join(" ")).toBe(q.input.answer.replace(/\n/g, " "));
+        } else if (kind === "bank") {
+          expect(q.order!.sequence).toHaveLength(3);
+          expect(q.choices).toHaveLength(5);
+          const filled = q.cloze!.map((c, i) => c + (i < 3 ? q.choices[q.order!.sequence[i]] : "")).join("");
+          expect(body).toContain(norm(filled.replace(/…/g, "")));
+        } else {
+          const [a, b] = q.choices[q.answer].split(" · ").map((x) => x.replace(/^\([가나]\) /, ""));
+          expect(body).toContain(norm((q.cloze![0] + a + q.cloze![1] + b + q.cloze![2]).replace(/…/g, "")));
+          expect(new Set(q.choices).size).toBe(q.choices.length);
+        }
+      }
+    }
+  });
+
+  it("first-consonant hints", () => {
+    expect(chosung("지키라 말고")).toBe("ㅈㅋㄹ ㅁㄱ");
+  });
+
+  it("a stretch of verses carries its levels and prepared near misses along", () => {
+    const vs = splitVerses(CHAPTER);
+    const p = { ...ch, progress: { 3: { r: 5, w: 0, s: 0, lv: 2 } }, variants: [{ start: vs[3].start, end: vs[3].start + 1, text: "그러면" }] };
+    const { passage, verseOffset } = subPassage(p, 2, 4);
+    expect(verseOffset).toBe(2);
+    expect(passage.progress).toEqual({ 1: { r: 5, w: 0, s: 0, lv: 2 } });
+    expect(passage.variants).toEqual([{ start: vs[3].start - vs[2].start, end: vs[3].start - vs[2].start + 1, text: "그러면" }]);
+  });
+
+  it("answers move the levels of the verses they tested", () => {
+    let p = { ...ch, correct: 0, wrong: 0, created_at: "" };
+    for (let k = 0; k < 5; k++) p = applyResult(p, true, [], [], [1, 2]);
+    expect(p.progress).toMatchObject({ 1: { lv: 2 }, 2: { lv: 2 } });
+  });
+});
+

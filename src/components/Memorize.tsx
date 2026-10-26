@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { repo } from "../data";
 import type { MemoryPassage } from "../data/types";
 import {
-  KIND_LABEL, applyResult, gradeRecitation, makeQuestion, norm, pickPassage, splitVerses, subPassage, tokenize,
-  type Grade, type Question, type VerseLine,
+  KIND_LABEL, LEVEL_LABEL, RECALL, applyResult, gradeRecitation, makeQuestion, nextProgress, norm, pickPassage,
+  splitVerses, subPassage, tokenize, verseLevel, type Grade, type Question, type VerseLine,
 } from "../lib/memorize";
 import { useToast } from "../lib/toast";
 
@@ -64,26 +64,32 @@ interface Retry { passageId: string; word?: number; due: number }
 /** Which passages to drill: all, one, or a stretch of one passage's verses (positions, inclusive). */
 interface Range { id: string; from: number; to: number }
 
-function useRecord(onPatch: (id: string, f: (p: MemoryPassage) => MemoryPassage) => void) {
+type RecordFn = (id: string, ok: boolean, hit: number[], miss: number[], verses?: number[], recall?: boolean) => void;
+
+function useRecord(onPatch: (id: string, f: (p: MemoryPassage) => MemoryPassage) => void): RecordFn {
   const toast = useToast();
-  return useCallback((id: string, ok: boolean, hit: number[], miss: number[]) => {
-    onPatch(id, (p) => applyResult(p, ok, hit, miss));
-    repo.recordMemoryResult(id, ok, hit, miss).catch((e: Error) => toast(`기록하지 못했습니다: ${e.message}`));
+  return useCallback((id, ok, hit, miss, verses = [], recall = false) => {
+    onPatch(id, (p) => applyResult(p, ok, hit, miss, verses, recall));
+    repo.recordMemoryResult(id, ok, hit, miss, verses, recall).catch((e: Error) => toast(`기록하지 못했습니다: ${e.message}`));
   }, [onPatch, toast]);
 }
 
-const isOrder = (q: Question) => !!q.order;
+/** Where a question's word and verse positions sit in the stored passage (when drilling a stretch). */
+interface Shift { words: number; verses: number }
 
 function Drill({ passages, active, onPatch }: {
   passages: MemoryPassage[]; active: boolean; onPatch(id: string, f: (p: MemoryPassage) => MemoryPassage): void;
 }) {
+  const toast = useToast();
   const [range, setRange] = useState<Range>({ id: "all", from: 0, to: 0 });
   const [q, setQ] = useState<Question | null>(null);
-  /** Word positions in `q` are this much less than in the stored passage (when drilling a stretch). */
-  const [offset, setOffset] = useState(0);
+  const [shift, setShift] = useState<Shift>({ words: 0, verses: 0 });
   const [picked, setPicked] = useState<number | null>(null);
   const [tapped, setTapped] = useState<number[]>([]);
   const [wrongTap, setWrongTap] = useState<number | null>(null);
+  const [typed, setTyped] = useState("");
+  const [hinted, setHinted] = useState(false);
+  const [grade, setGrade] = useState<Grade | null>(null);
   const [outcome, setOutcome] = useState<boolean | null>(null);
   const [stats, setStats] = useState({ asked: 0, right: 0, streak: 0 });
   const retries = useRef<Retry[]>([]);
@@ -93,11 +99,13 @@ function Drill({ passages, active, onPatch }: {
   const one = passages.find((p) => p.id === range.id);
   const verses = useMemo(() => (one ? splitVerses(one.body) : []), [one?.body]);
   const pool = useMemo(() => {
-    if (!one) return passages.map((p) => ({ passage: p, offset: 0 }));
-    const whole = range.from === 0 && range.to >= verses.length - 1;
-    return [whole ? { passage: one, offset: 0 } : subPassage(one, range.from, range.to)];
+    const none = { words: 0, verses: 0 };
+    if (!one) return passages.map((p) => ({ passage: p, shift: none }));
+    if (range.from === 0 && range.to >= verses.length - 1) return [{ passage: one, shift: none }];
+    const s = subPassage(one, range.from, range.to);
+    return [{ passage: s.passage, shift: { words: s.offset, verses: s.verseOffset } }];
   }, [passages, one, range.from, range.to, verses.length]);
-  // Pick from the latest stats, but don't regenerate the question when only the stats change
+  // Pick from the latest stats and levels, but don't regenerate the question when only those change
   const poolRef = useRef(pool);
   poolRef.current = pool;
 
@@ -106,24 +114,27 @@ function Drill({ passages, active, onPatch }: {
     const ps = poolRef.current;
     const all = ps.map((x) => x.passage);
     const due = retries.current.findIndex((r) => r.due <= asked && ps.some((x) => x.passage.id === r.passageId));
-    let made: { q: Question; offset: number } | null = null;
+    let made: { q: Question; shift: Shift } | null = null;
     if (due >= 0) {
       const [r] = retries.current.splice(due, 1);
       const x = ps.find((y) => y.passage.id === r.passageId)!;
       const q = makeQuestion(x.passage, all, Math.random, r.word);
-      if (q) made = { q, offset: x.offset };
+      if (q) made = { q, shift: x.shift };
     }
     for (let tries = 0; !made && tries < 5; tries++) {
       const p = pickPassage(all, Math.random);
       const x = p && ps.find((y) => y.passage === p);
       const q = x && makeQuestion(x.passage, all, Math.random);
-      if (q) made = { q, offset: x.offset };
+      if (q) made = { q, shift: x.shift };
     }
     setQ(made?.q ?? null);
-    setOffset(made?.offset ?? 0);
+    setShift(made?.shift ?? { words: 0, verses: 0 });
     setPicked(null);
     setTapped([]);
     setWrongTap(null);
+    setTyped("");
+    setHinted(false);
+    setGrade(null);
     setOutcome(null);
   }, []);
 
@@ -131,19 +142,25 @@ function Drill({ passages, active, onPatch }: {
   useEffect(() => { retries.current = []; next(0); }, [range, next]);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
-  const finish = useCallback((ok: boolean, hit: number[], miss: number[]) => {
+  const finish = useCallback((ok: boolean, hit: number[], miss: number[], usedHint = false) => {
     if (!q) return;
     setOutcome(ok);
     const asked = stats.asked + 1;
     setStats((s) => ({ asked: s.asked + 1, right: s.right + (ok ? 1 : 0), streak: ok ? s.streak + 1 : 0 }));
-    record(q.passageId, ok, hit.map((w) => w + offset), miss.map((w) => w + offset));
-    if (ok) timer.current = window.setTimeout(() => next(asked), 900);
+    const recall = RECALL.has(q.kind);
+    // Like a recitation contest, a hint costs the credit: no level progress for that answer
+    const vs = usedHint ? [] : q.verses.map((v) => v + shift.verses);
+    record(q.passageId, ok, hit.map((w) => w + shift.words), miss.map((w) => w + shift.words), vs, recall);
+    const stored = passages.find((x) => x.id === q.passageId);
+    const up = stored && vs.map((v) => nextProgress(stored.progress?.[v], ok, recall).lv).find((lv, k) => lv > verseLevel(stored, vs[k]));
+    if (up) toast(`${up}단계 ${LEVEL_LABEL[up]}로 올랐습니다`);
+    if (ok) timer.current = window.setTimeout(() => next(asked), q.input ? 1400 : 900);
     // Missed it: the same spot comes back in a different form a few questions later
     else retries.current.push({ passageId: q.passageId, word: miss[0] ?? q.words[0], due: asked + 3 });
-  }, [q, stats.asked, record, next, offset]);
+  }, [q, stats.asked, record, next, shift, passages, toast]);
 
   const answer = useCallback((i: number) => {
-    if (!q || outcome !== null) return;
+    if (!q || outcome !== null || q.input) return;
     if (!q.order) {
       setPicked(i);
       const ok = i === q.answer;
@@ -156,18 +173,32 @@ function Drill({ passages, active, onPatch }: {
     if (i === want || norm(q.choices[i]) === norm(q.choices[want])) {
       const t = [...tapped, i];
       setTapped(t);
-      if (t.length === q.choices.length) finish(true, q.words, []);
+      if (t.length === q.order.sequence.length) finish(true, q.words, []);
     } else {
       setWrongTap(i);
-      finish(false, tapped.map((c) => q.order!.firstWord[c]), [q.order.firstWord[want]]);
+      finish(false, tapped.map((c) => q.order!.firstWord[c]).filter((w) => w >= 0), [q.order.firstWord[want]]);
     }
   }, [q, outcome, tapped, finish]);
+
+  const submitTyped = (e?: FormEvent) => {
+    e?.preventDefault();
+    if (!q?.input || outcome !== null || !typed.trim()) return;
+    const g = gradeRecitation(q.input.answer, typed);
+    setGrade(g);
+    const wrong = new Set(g.wrongWords.map((k) => q.words[k]));
+    finish(g.perfect, q.words.filter((w) => !wrong.has(w)), [...wrong].filter((w) => w !== undefined), hinted);
+  };
+  const giveUp = () => {
+    if (!q?.input || outcome !== null) return;
+    setGrade(null);
+    finish(false, [], q.words);
+  };
 
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-      if (outcome === null && q && q.kind !== "wrong" && /^[1-9]$/.test(e.key) && Number(e.key) <= q.choices.length) answer(Number(e.key) - 1);
+      if (outcome === null && q && !q.input && q.kind !== "wrong" && /^[1-9]$/.test(e.key) && Number(e.key) <= q.choices.length) answer(Number(e.key) - 1);
       else if (outcome !== null && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); next(stats.asked); }
     };
     window.addEventListener("keydown", onKey);
@@ -181,6 +212,15 @@ function Drill({ passages, active, onPatch }: {
     if (q.order) return i === wrongTap ? " wrong" : "";
     return i === q.answer ? " right" : i === picked ? " wrong" : "";
   };
+  /** Bank: the words tapped so far fill the blanks; pair: the right pair fills them once answered. */
+  const clozeFill = (k: number) => {
+    if (!q) return "";
+    if (q.kind === "bank") return tapped[k] !== undefined ? q.choices[tapped[k]] : outcome !== null ? q.choices[q.order!.sequence[k]] : "";
+    if (q.kind === "pair" && outcome !== null) return q.choices[q.answer].split(" · ")[k]?.replace(/^\([가나]\) /, "") ?? "";
+    return "";
+  };
+  const slotLabel = (k: number) => (q?.kind === "pair" ? (k ? "(나)" : "(가)") : "①②③④⑤⑥"[k]);
+  const long = q?.kind === "finish" || q?.kind === "quote";
 
   return (
     <div className="drill">
@@ -219,27 +259,45 @@ function Drill({ passages, active, onPatch }: {
       ) : (
         <section className="card quiz" aria-label="문제">
           <div className="card-top">
-            <span className="tag on">{KIND_LABEL[q.kind]}</span>
+            <span className="tags">
+              <span className="tag on">{KIND_LABEL[q.kind]}</span>
+              <span className="tag" title="문제 단계">{q.level}단계 {LEVEL_LABEL[q.level]}</span>
+            </span>
             {q.kind !== "ref" && p && <span className="score">{p.ref}</span>}
           </div>
           <h2 className="quiz-prompt">{q.prompt}</h2>
 
           {q.context && (
-            <p className={"vtext quiz-context" + (isOrder(q) || q.kind === "seam" ? " anchor" : "")}>
+            <p className={"vtext quiz-context" + (q.order || q.kind === "seam" || q.input ? " anchor" : "") + (q.kind === "ox" ? " ox-text" : "")}>
               {q.context.before}
-              {q.context.blank && (
+              {q.context.blank && !q.input && (
                 <span className={"blank" + (outcome !== null ? " filled" : "")}>
                   {outcome !== null ? q.choices[q.answer] : "　　　"}
                 </span>
               )}
+              {q.context.blank && q.input && <span className="blank">{outcome !== null ? q.input.answer : "　？　"}</span>}
+              {q.context.after && " "}
               {q.context.after}
               {!q.context.blank && (q.kind === "next" || q.kind === "seam") && <span className="blank">　…　</span>}
             </p>
           )}
 
-          {q.order && (
+          {q.cloze && (
+            <p className="vtext quiz-context">
+              {q.cloze.map((part, k) => (
+                <span key={k}>
+                  {part}
+                  {k < q.cloze!.length - 1 && (
+                    <span className={"blank" + (clozeFill(k) ? " filled" : "")}>{clozeFill(k) || slotLabel(k)}</span>
+                  )}
+                </span>
+              ))}
+            </p>
+          )}
+
+          {q.order && q.kind !== "bank" && (
             <ol className="order-slots" aria-label="고른 순서">
-              {q.choices.map((_, k) => (
+              {q.order.sequence.map((_, k) => (
                 <li key={k} className={tapped[k] !== undefined ? "filled" : ""}>
                   {tapped[k] !== undefined ? <span className="vtext">{q.choices[tapped[k]]}</span> : <span className="slot-num">{k + 1}</span>}
                 </li>
@@ -247,14 +305,36 @@ function Drill({ passages, active, onPatch }: {
             </ol>
           )}
 
-          {q.kind === "wrong" ? (
+          {q.input ? (
+            <form className="typed" onSubmit={submitTyped}>
+              {long ? (
+                <textarea
+                  className="recite" aria-label="답 쓰기" value={typed} rows={q.kind === "quote" ? 6 : 3} disabled={outcome !== null}
+                  onChange={(e) => setTyped(e.target.value)} autoComplete="off" autoCorrect="off" spellCheck={false}
+                />
+              ) : (
+                <input
+                  className="recite" aria-label="답 쓰기" value={typed} disabled={outcome !== null} enterKeyHint="done"
+                  onChange={(e) => setTyped(e.target.value)} autoComplete="off" autoCorrect="off" spellCheck={false}
+                />
+              )}
+              {hinted && outcome === null && <p className="sub hint-text">힌트: {q.input.hint}</p>}
+              {outcome === null && (
+                <div className="card-actions">
+                  <button type="button" className="ghost" onClick={() => setHinted(true)} disabled={hinted}>초성 힌트</button>
+                  <button type="button" className="ghost" onClick={giveUp}>모르겠어요</button>
+                  <button type="submit" className="btn-primary" disabled={!typed.trim()}>확인</button>
+                </div>
+              )}
+            </form>
+          ) : q.kind === "wrong" ? (
             <p className="vtext word-pick">
               {q.choices.map((w, i) => (
                 <button key={i} type="button" disabled={outcome !== null} className={choiceClass(i).trim()} onClick={() => answer(i)}>{w}</button>
               ))}
             </p>
           ) : (
-            <ol className={"choices" + (q.order ? " pieces" : "")}>
+            <ol className={"choices" + (q.order ? " pieces" : "") + (q.kind === "ox" ? " ox" : "") + (q.kind === "bank" ? " bank" : "")}>
               {q.choices.map((c, i) => (
                 <li key={i}>
                   <button
@@ -262,8 +342,8 @@ function Drill({ passages, active, onPatch }: {
                     className={"choice" + choiceClass(i) + (tapped.includes(i) ? " used" : "")}
                     onClick={() => answer(i)}
                   >
-                    <span className="choice-num" aria-hidden>{i + 1}</span>
-                    <span className={q.kind === "ref" ? "" : "vtext"}>{c}</span>
+                    {q.kind !== "bank" && <span className="choice-num" aria-hidden>{i + 1}</span>}
+                    <span className={q.kind === "ref" || q.kind === "ox" ? "" : "vtext"}>{c}</span>
                   </button>
                 </li>
               ))}
@@ -272,14 +352,17 @@ function Drill({ passages, active, onPatch }: {
 
           {outcome !== null && (
             <div className={"feedback " + (outcome ? "ok" : "no")} role="status">
-              <p className="feedback-title">{outcome ? "정답" : "오답 · 곧 다시 나옵니다"}</p>
+              <p className="feedback-title">
+                {outcome ? (hinted ? "정답 · 힌트를 써서 단계에는 반영하지 않습니다" : "정답") : "오답 · 곧 다시 나옵니다"}
+              </p>
+              {grade && !grade.perfect && <DiffView grade={grade} />}
               {!outcome && <p className="vtext reveal">{q.reveal}</p>}
               <button type="button" className="btn-primary" onClick={() => next(stats.asked)}>다음 문제</button>
             </div>
           )}
         </section>
       )}
-      <p className="sub hint">숫자 키로 고르고 Enter로 넘어갑니다. 순서 문제는 맞는 순서대로 누르세요. 맞히면 자동으로 다음 문제로 갑니다.</p>
+      <p className="sub hint">숫자 키로 고르고 Enter로 넘어갑니다. 많이 맞힐수록 절마다 단계가 올라 쓰는 문제가 늘어납니다.</p>
     </div>
   );
 }
@@ -342,8 +425,6 @@ function WriteOut({ passages, onPatch }: {
     </div>
   );
 }
-
-type RecordFn = (id: string, ok: boolean, hit: number[], miss: number[]) => void;
 
 function Whole({ p, verses, record }: { p: MemoryPassage; verses: VerseLine[]; record: RecordFn }) {
   const [text, setText] = useState("");
@@ -413,7 +494,7 @@ function VerseByVerse({ p, verses, record }: { p: MemoryPassage; verses: VerseLi
     if (grade) { advance(grade); return; }
     const g = gradeRecitation(v.words.join(" "), text);
     const wrong = new Set(g.wrongWords);
-    record(p.id, g.perfect, v.words.map((_, i) => i).filter((i) => !wrong.has(i)).map((i) => i + v.start), g.wrongWords.map((i) => i + v.start));
+    record(p.id, g.perfect, v.words.map((_, i) => i).filter((i) => !wrong.has(i)).map((i) => i + v.start), g.wrongWords.map((i) => i + v.start), [k], true);
     if (g.perfect) advance(g);
     else setGrade(g);
   };
@@ -581,20 +662,26 @@ function VersePreview({ body }: { body: string }) {
   );
 }
 
-/** One cell per verse, darker where I miss more. */
+/** One cell per verse, filled by level (1 알아보기 … 4 암송하기); outlined where I still miss a lot. */
 function VerseBar({ p }: { p: MemoryPassage }) {
   const vs = splitVerses(p.body);
-  if (vs.length < 2) return null;
   const miss = vs.map((v) => {
     let n = 0;
     for (let i = v.start; i < v.start + v.words.length; i++) n += p.misses[i] ?? 0;
     return n;
   });
+  const lv = vs.map((_, i) => verseLevel(p, i));
+  const done = lv.filter((x) => x === 4).length;
   return (
-    <div className="verse-bar" role="img" aria-label={`절별로 틀린 횟수: ${vs.map((v, i) => `${v.n}절 ${miss[i]}`).join(", ")}`}>
-      {vs.map((v, i) => (
-        <span key={i} className={"cell" + (miss[i] >= 3 ? " bad" : miss[i] > 0 ? " weak" : "")} title={`${v.n}절 · 틀림 ${miss[i]}`} />
-      ))}
+    <div className="verse-bar-wrap">
+      <div className="verse-bar" role="img" aria-label={`절별 단계: ${vs.map((v, i) => `${v.n}절 ${lv[i]}단계`).join(", ")}`}>
+        {vs.map((v, i) => (
+          <span key={i} className={`cell lv${lv[i]}` + (miss[i] >= 3 ? " bad" : "")} title={`${v.n}절 · ${lv[i]}단계 ${LEVEL_LABEL[lv[i]]} · 틀림 ${miss[i]}`} />
+        ))}
+      </div>
+      <p className="verse-bar-legend">
+        {vs.length > 1 ? `${vs.length}절 중 ${done}절 암송하기 단계` : `${lv[0]}단계 ${LEVEL_LABEL[lv[0]]}`} · 칸이 진할수록 높은 단계
+      </p>
     </div>
   );
 }

@@ -47,8 +47,8 @@ export function buildCliMessage(job: CliJob) {
   return out.join("\n");
 }
 
-/** Parses `claude -p --output-format json` output. */
-export function parseCliOutput(stdout: string, job: CliJob): CliResult {
+/** The JSON envelope of `claude -p --output-format json`, with usage limits and errors turned into exceptions. */
+export function parseCliJson(stdout: string) {
   let j;
   try {
     j = JSON.parse(stdout);
@@ -60,6 +60,12 @@ export function parseCliOutput(stdout: string, job: CliJob): CliResult {
     throw new UsageLimitError(String(j.result ?? "사용량 한도에 도달했습니다").slice(0, 200));
   }
   if (j.is_error || j.subtype !== "success") throw new Error(`claude 오류 (${j.subtype}): ${String(j.result ?? "").slice(0, 200)}`);
+  return j;
+}
+
+/** Parses `claude -p --output-format json` output. */
+export function parseCliOutput(stdout: string, job: CliJob): CliResult {
+  const j = parseCliJson(stdout);
   const list: { chapter: number; verse: number; text: string }[] = j.structured_output?.translations ?? [];
   const texts = new Map(list.map((t) => [cliKey(t.chapter, t.verse), t.text.trim()]));
   const missing = job.targets.filter((t) => !texts.get(cliKey(t.chapter, t.verse)));
@@ -68,16 +74,18 @@ export function parseCliOutput(stdout: string, job: CliJob): CliResult {
 }
 
 /** Minimal context: no tools, settings, MCP servers or skills, so each call carries ~1.2k tokens of overhead. */
-export const CLI_ARGS = [
+export const cliArgs = (system: string, schema: object) => [
   "-p", "--model", "sonnet", "--tools", "", "--no-session-persistence", "--output-format", "json",
   "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
-  "--system-prompt", SYSTEM, "--json-schema", JSON.stringify(SCHEMA),
+  "--system-prompt", system, "--json-schema", JSON.stringify(schema),
 ];
+export const CLI_ARGS = cliArgs(SYSTEM, SCHEMA);
 
-export function runClaudeCli(job: CliJob, timeoutMs = 10 * 60_000): Promise<CliResult> {
+/** Runs `claude` with `args`, `input` on stdin, and hands its stdout to `parse`. */
+export function spawnClaude<T>(args: string[], input: string, parse: (stdout: string) => T, timeoutMs = 10 * 60_000): Promise<T> {
   return new Promise((resolve, reject) => {
     // Neutral working directory, so no project files or CLAUDE.md are picked up
-    const child = spawn("claude", CLI_ARGS, { cwd: tmpdir(), stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("claude", args, { cwd: tmpdir(), stdio: ["pipe", "pipe", "pipe"] });
     let out = "", err = "";
     const timer = setTimeout(() => { child.kill(); reject(new Error("claude 응답 시간 초과")); }, timeoutMs);
     child.stdout.on("data", (d) => (out += d));
@@ -86,12 +94,16 @@ export function runClaudeCli(job: CliJob, timeoutMs = 10 * 60_000): Promise<CliR
     child.on("close", () => {
       clearTimeout(timer);
       try {
-        resolve(parseCliOutput(out, job));
+        resolve(parse(out));
       } catch (e) {
         if (!out.trim() && err.trim()) reject(new Error(`claude 실행 실패: ${err.trim().slice(0, 300)}`));
         else reject(e);
       }
     });
-    child.stdin.end(buildCliMessage(job));
+    child.stdin.end(input);
   });
+}
+
+export function runClaudeCli(job: CliJob, timeoutMs = 10 * 60_000): Promise<CliResult> {
+  return spawnClaude(CLI_ARGS, buildCliMessage(job), (out) => parseCliOutput(out, job), timeoutMs);
 }

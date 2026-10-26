@@ -391,5 +391,21 @@ footer { font-size: 12px; color: var(--muted); padding-block: 0 32px; }
 .vnum-sm { font-family: var(--font-mono); font-size: 11px; color: var(--accent); display: inline-block; min-width: 1.8em; }
 .verse-bar { display: flex; gap: 2px; }
 .verse-bar .cell { flex: 1; height: 8px; border-radius: 2px; background: var(--accent-soft); }
-.verse-bar .cell.weak { background: var(--note-fg); opacity: 0.55; }
-.verse-bar .cell.bad { background: var(--danger); }
+
+.verse-bar .cell.bad { outline: 2px solid var(--danger); outline-offset: -2px; }
+
+/* Memorize: levels and typed answers */
+.quiz .tags { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.choices.ox { grid-template-columns: 1fr 1fr; }
+.choices.ox .choice { grid-template-columns: 1fr; justify-items: center; font-size: 17px; font-weight: 600; padding: 14px; }
+.choices.ox .choice-num { display: none; }
+.quiz-context.ox-text { color: var(--fg); background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 17px; }
+.choices.bank { display: flex; flex-wrap: wrap; gap: 6px; }
+.choices.bank .choice { grid-template-columns: 1fr; width: auto; padding: 6px 12px; }
+.typed { display: grid; gap: 8px; }
+.typed input.recite { font-family: var(--font-verse); font-size: 17px; }
+.hint-text { margin: 0; letter-spacing: 0.08em; font-family: var(--font-mono); }
+.verse-bar .cell.lv2 { background: var(--note-fg); opacity: 0.45; }
+.verse-bar .cell.lv3 { background: var(--accent); opacity: 0.6; }
+.verse-bar .cell.lv4 { background: var(--accent); }
+.verse-bar-legend { margin: 0; font-size: 11px; color: var(--muted); }
