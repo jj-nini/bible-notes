@@ -226,4 +226,68 @@ describe("app (sample mode)", () => {
     await user.click(within(item).getByRole("button", { name: "정말 삭제" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "빌립보서 4:6" })).toBeNull());
   });
+
+  it("memorize a whole chapter: preview split, verse order by tapping, a verse range, verse-by-verse writing", async () => {
+    const VERSES = [
+      "내 친구야 나의 말을 잊지 말고 네 마음에 새기라",
+      "그리하면 그것이 너를 지키며 평안을 더하게 하리라",
+      "진실과 사랑이 너를 떠나지 말게 하고 그것을 네 손에 매라",
+      "그리하면 네가 모든 사람 앞에서 칭찬을 받으리라",
+      "너는 아침마다 일어나 감사하고 저녁마다 쉬라",
+    ];
+    const user = userEvent.setup();
+    setup();
+    await screen.findByRole("heading", { name: "빌립보서 4장" });
+    await user.click(screen.getByRole("tab", { name: "암송" }));
+    await user.click(screen.getByRole("button", { name: "본문 관리" }));
+    await user.type(screen.getByLabelText("장절"), "연습 1장");
+    await user.click(screen.getByLabelText("본문"));
+    await user.paste(VERSES.map((v, i) => `${i + 1}   ${v}`).join("\n"));
+    expect(screen.getByText("5절", { selector: "b" })).toBeTruthy(); // preview: 5절로 나눴습니다
+    await user.click(screen.getByRole("button", { name: "추가" }));
+    await screen.findByRole("heading", { name: "연습 1장" });
+
+    // Drill only this chapter until a verse-order question comes up
+    await user.click(screen.getByRole("button", { name: "문제 풀기" }));
+    await user.selectOptions(await screen.findByLabelText("문제 범위"), screen.getByRole("option", { name: "연습 1장" }));
+    expect(screen.getByLabelText("구간 시작")).toBeTruthy();
+    const quiz = () => screen.getByRole("region", { name: "문제" });
+    const orderOf = (t: string) => VERSES.findIndex((v) => t.includes(v));
+    const nextOrder = async () => {
+      for (let k = 0; k < 120; k++) {
+        if (within(quiz()).queryByText("절 순서")) return;
+        // A put-in-order piece already tapped is disabled: take the first one still open
+        await user.click(within(quiz()).getAllByRole("button").find((b) => !(b as HTMLButtonElement).disabled)!);
+        const more = within(quiz()).queryByRole("button", { name: "다음 문제" });
+        if (more) await user.click(more);
+      }
+      throw new Error("no verse-order question");
+    };
+    const pieces = () => within(quiz()).getAllByRole("button").filter((b) => orderOf(b.textContent!) >= 0);
+
+    await nextOrder();
+    for (const b of [...pieces()].sort((a, b) => orderOf(a.textContent!) - orderOf(b.textContent!))) await user.click(b);
+    expect(within(quiz()).getByText("정답")).toBeTruthy();
+    await user.click(within(quiz()).getByRole("button", { name: "다음 문제" }));
+
+    await nextOrder();
+    const sorted = [...pieces()].sort((a, b) => orderOf(a.textContent!) - orderOf(b.textContent!));
+    await user.click(sorted[sorted.length - 1]); // the last verse first
+    expect(within(quiz()).getByText(/^오답/)).toBeTruthy();
+    expect(quiz().querySelector(".reveal")!.textContent).toContain(VERSES[orderOf(sorted[0].textContent!)]);
+
+    // Write one verse at a time
+    await user.click(screen.getByRole("button", { name: "외워 쓰기" }));
+    await user.selectOptions(screen.getByLabelText("외울 본문"), screen.getByRole("option", { name: "연습 1장" }));
+    await user.click(screen.getByRole("button", { name: "한 절씩" }));
+    const box = screen.getByLabelText("이어지는 절을 쓰고 Enter");
+    await user.type(box, VERSES[0] + "{Enter}");
+    expect(await screen.findByText("2 / 5")).toBeTruthy();
+    expect(screen.getByText("1 ✓")).toBeTruthy();
+    await user.type(box, VERSES[1].replace("지키며", "지키고") + "{Enter}");
+    expect(await screen.findByText("7어절 중 1어절이 다릅니다")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "다음 절" }));
+    expect(await screen.findByText("3 / 5")).toBeTruthy();
+    expect(screen.getByText("2 ✗1")).toBeTruthy();
+  });
 });

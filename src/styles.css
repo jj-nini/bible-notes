@@ -365,3 +365,31 @@ footer { font-size: 12px; color: var(--muted); padding-block: 0 32px; }
 .memo-body { font-size: 16px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .memo-item .tags { align-items: center; }
 .ghost.danger { color: var(--danger); border-color: var(--danger); }
+
+/* Memorize: whole chapters */
+.range { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.range-verses { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+.quiz-context.anchor { color: var(--muted); font-size: 16px; }
+.order-slots { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; counter-reset: slot; }
+.order-slots li {
+  min-height: 40px; border: 1px dashed var(--line); border-radius: 10px; padding: 8px 12px;
+  display: flex; align-items: center;
+}
+.order-slots li.filled { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
+.order-slots .vtext { font-size: 16px; line-height: 1.7; }
+.slot-num { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.choice.used { opacity: 0.35; }
+.reveal, .diff, .initials, .memo-body { white-space: pre-line; }
+.verse-chips { margin: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.vchip {
+  font-family: var(--font-mono); font-size: 12px; border-radius: 4px; padding: 0 6px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.vchip.bad { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+.preview { display: grid; gap: 4px; }
+.preview ol { list-style: none; margin: 0; padding: 8px 10px; max-height: 180px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; display: grid; gap: 2px; }
+.vnum-sm { font-family: var(--font-mono); font-size: 11px; color: var(--accent); display: inline-block; min-width: 1.8em; }
+.verse-bar { display: flex; gap: 2px; }
+.verse-bar .cell { flex: 1; height: 8px; border-radius: 2px; background: var(--accent-soft); }
+.verse-bar .cell.weak { background: var(--note-fg); opacity: 0.55; }
+.verse-bar .cell.bad { background: var(--danger); }

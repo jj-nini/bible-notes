@@ -10,7 +10,7 @@ export interface DrillPassage {
   misses: Record<string, number>;
 }
 
-export type QuizKind = "blank" | "exact" | "next" | "wrong" | "ref" | "first";
+export type QuizKind = "blank" | "exact" | "next" | "wrong" | "ref" | "first" | "verseOrder" | "chunkOrder" | "seam";
 
 export const KIND_LABEL: Record<QuizKind, string> = {
   blank: "빈칸",
@@ -19,6 +19,9 @@ export const KIND_LABEL: Record<QuizKind, string> = {
   wrong: "틀린 곳 찾기",
   ref: "장절 맞히기",
   first: "첫마디",
+  verseOrder: "절 순서",
+  chunkOrder: "절 안 순서",
+  seam: "다음 절",
 };
 
 export interface Question {
@@ -33,6 +36,11 @@ export interface Question {
   words: number[];
   /** The original text, shown after answering. */
   reveal: string;
+  /**
+   * Put-in-order questions: tap `choices` in this order (`answer` is -1).
+   * `firstWord[c]` is where choice c starts in the passage, for weak-word tracking.
+   */
+  order?: { sequence: number[]; firstWord: number[] };
 }
 
 export type Rng = () => number;
@@ -69,7 +77,55 @@ function weighted<T>(rng: Rng, items: { item: T; w: number }[]): T | null {
 
 // ---------------------------------------------------------------- text
 
-export const tokenize = (body: string) => body.trim().split(/\s+/).filter(Boolean);
+const words = (s: string) => s.trim().split(/\s+/).filter(Boolean);
+const VERSE_NO = /^(\d{1,3})[.)]?$/;
+
+export interface VerseLine {
+  /** The number I typed, or its position when I typed none. Only used to split and label. */
+  n: number;
+  words: string[];
+  /** Position of its first word in the whole passage. */
+  start: number;
+}
+
+/**
+ * Splits a passage into verses: one per line, a leading verse number optional ("1   내 아들아 …").
+ * A single pasted line is split at inline numbers counting up from the first ("1 … 2 … 3 …").
+ * Verse numbers are dropped from the text: they are never drilled or graded.
+ */
+export function splitVerses(body: string): VerseLine[] {
+  const lines = body.split(/\r?\n/).map((l) => words(l)).filter((l) => l.length);
+  let raw: { n: number | null; words: string[] }[];
+  if (lines.length > 1) {
+    raw = lines.map((l) => {
+      const m = VERSE_NO.exec(l[0]);
+      return m && l.length > 1 ? { n: Number(m[1]), words: l.slice(1) } : { n: null, words: l };
+    });
+  } else {
+    const ws = lines[0] ?? [];
+    const first = VERSE_NO.exec(ws[0] ?? "");
+    raw = [];
+    if (first && ws.length > 1) {
+      let next = Number(first[1]);
+      for (const w of ws) {
+        const m = VERSE_NO.exec(w);
+        if (m && Number(m[1]) === next) { raw.push({ n: next, words: [] }); next++; }
+        else raw[raw.length - 1].words.push(w);
+      }
+      raw = raw.filter((v) => v.words.length);
+    } else if (ws.length) raw = [{ n: null, words: ws }];
+  }
+  const out: VerseLine[] = [];
+  let start = 0;
+  for (const v of raw) {
+    out.push({ n: v.n ?? (out.length ? out[out.length - 1].n + 1 : 1), words: v.words, start });
+    start += v.words.length;
+  }
+  return out;
+}
+
+/** The passage's words, verse numbers left out. */
+export const tokenize = (body: string) => splitVerses(body).flatMap((v) => v.words);
 /** Letters and digits only: punctuation and spacing are not graded. */
 export const norm = (s: string) => s.replace(/[^\p{L}\p{N}]/gu, "");
 
@@ -366,6 +422,8 @@ function fakeRefs(ref: string, rng: Rng): string[] {
 }
 
 function refQ(p: DrillPassage, words: string[], i: number, all: DrillPassage[], rng: Rng): Question | null {
+  // Only to tell my passages apart; made-up chapter numbers alone aren't worth drilling
+  if (new Set(all.map((x) => x.ref.trim())).size < 2) return null;
   const others = shuffle(rng, [...new Set(all.map((x) => x.ref.trim()))].filter((r) => r && r !== p.ref.trim()));
   const wrong = [...others, ...fakeRefs(p.ref.trim(), rng)].filter((r, k, a) => a.indexOf(r) === k).slice(0, 3);
   const { start, end } = windowAround(words.length, i, WINDOW, rng);
@@ -376,16 +434,171 @@ function refQ(p: DrillPassage, words: string[], i: number, all: DrillPassage[], 
   }, p.ref.trim(), wrong, rng);
 }
 
+// ---------------------------------------------------------------- whole-chapter questions
+
+/**
+ * Splits one verse into 3–6 pieces for put-in-order questions, cutting where the sense breaks:
+ * after punctuation, a connecting ending (말고, 매며, 하여) or a vocative (아들아).
+ */
+export function chunkVerse(ws: string[]): string[][] {
+  if (ws.length < 3) return [];
+  // 잊어버리지 말고, 떠나지 말게 하고: -지/-게 lean on the next word
+  const leans = (w: string) => /[지게]$/.test(splitPunct(w).core);
+  const breaks = (w: string) => {
+    const { core, trail } = splitPunct(w);
+    if (trail) return true;
+    const e = parse(core).ending?.form;
+    return (e && CONNECT.includes(e) && !leans(w)) || /(?:하여|하사|아|야)$/.test(core);
+  };
+  let chunks: string[][] = [[]];
+  for (const w of ws) {
+    const cur = chunks[chunks.length - 1];
+    cur.push(w);
+    if ((cur.length >= 2 && breaks(w)) || (cur.length >= 4 && !leans(w)) || cur.length >= 6) chunks.push([]);
+  }
+  chunks = chunks.filter((c) => c.length);
+  // A trailing single word reads better with the piece before it
+  if (chunks.length > 1 && chunks[chunks.length - 1].length === 1) chunks[chunks.length - 2].push(...chunks.pop()!);
+  while (chunks.length > 6) {
+    let best = 0;
+    for (let i = 1; i < chunks.length - 1; i++) {
+      if (chunks[i].length + chunks[i + 1].length < chunks[best].length + chunks[best + 1].length) best = i;
+    }
+    chunks.splice(best, 2, [...chunks[best], ...chunks[best + 1]]);
+  }
+  if (chunks.length < 3) {
+    // Too few natural breaks: even pieces of about two words
+    const size = Math.max(1, Math.floor(ws.length / 3));
+    chunks = [];
+    for (let i = 0; i < ws.length; i += size) chunks.push(ws.slice(i, i + size));
+    while (chunks.length > 6) chunks.splice(chunks.length - 2, 2, [...chunks[chunks.length - 2], ...chunks[chunks.length - 1]]);
+  }
+  return chunks.length >= 3 ? chunks : [];
+}
+
+const verseAt = (vs: VerseLine[], i: number) => {
+  let k = 0;
+  while (k + 1 < vs.length && vs[k + 1].start <= i) k++;
+  return k;
+};
+
+/** Shuffled pieces to tap in order. Never shown already in order. */
+function orderQ(
+  p: DrillPassage, kind: "verseOrder" | "chunkOrder", prompt: string, pieces: { text: string; first: number }[],
+  context: string, reveal: string, rng: Rng,
+): Question | null {
+  if (pieces.length < 3) return null;
+  let perm = shuffle(rng, pieces.map((_, i) => i));
+  for (let t = 0; t < 5 && perm.every((x, i) => x === i); t++) perm = shuffle(rng, perm);
+  if (perm.every((x, i) => x === i)) [perm[0], perm[1]] = [perm[1], perm[0]];
+  const choices = perm.map((i) => pieces[i].text);
+  return {
+    kind, passageId: p.id, prompt, choices, answer: -1,
+    context: context ? { before: context, after: "", blank: false } : undefined,
+    words: pieces.map((x) => x.first), reveal,
+    order: { sequence: pieces.map((_, i) => perm.indexOf(i)), firstWord: perm.map((i) => pieces[i].first) },
+  };
+}
+
+const tail = (ws: string[], n: number) => (ws.length > n ? "… " : "") + ws.slice(-n).join(" ");
+
+function verseOrderQ(p: DrillPassage, vs: VerseLine[], i: number, rng: Rng): Question | null {
+  if (vs.length < 3) return null;
+  const size = Math.min(vs.length, 3 + randInt(rng, 3));
+  const at = verseAt(vs, i);
+  const from = Math.max(0, Math.min(vs.length - size, at - randInt(rng, size)));
+  const win = vs.slice(from, from + size);
+  return orderQ(
+    p, "verseOrder", "절의 순서대로 누르세요.",
+    win.map((v) => ({ text: v.words.join(" "), first: v.start })),
+    from > 0 ? tail(vs[from - 1].words, 5) : "", win.map((v) => v.words.join(" ")).join("\n"), rng,
+  );
+}
+
+function chunkOrderQ(p: DrillPassage, vs: VerseLine[], i: number, rng: Rng): Question | null {
+  const v = vs[verseAt(vs, i)];
+  let chunks = chunkVerse(v.words);
+  let offset = 0;
+  // One long unbroken passage: a run of five pieces around the word
+  if (chunks.length === 6 && v.words.length > 24) {
+    const all = chunks;
+    let acc = 0;
+    const firsts = all.map((c) => { const f = acc; acc += c.length; return f; });
+    const k = Math.max(0, Math.min(all.length - 5, firsts.findIndex((f, j) => i - v.start < f + all[j].length) - 2));
+    chunks = all.slice(k, k + 5);
+    offset = firsts[k];
+  }
+  if (chunks.length < 3) return null;
+  let first = v.start + offset;
+  const pieces = chunks.map((c) => { const x = { text: c.join(" "), first }; first += c.length; return x; });
+  const before = vs[verseAt(vs, i) - 1];
+  return orderQ(
+    p, "chunkOrder", "한 절을 나눠 섞었습니다. 순서대로 누르세요.", pieces,
+    offset > 0 ? tail(v.words.slice(0, offset), 5) : before ? tail(before.words, 5) : "",
+    pieces.map((x) => x.text).join(" "), rng,
+  );
+}
+
+/**
+ * How many words it takes before no other verse opens the same way
+ * (그리하면 그것이 / 그리하면 네가 / 그리하면 네 창고가: "그리하면 네" alone would also be how 4절 opens).
+ */
+function distinctStart(vs: VerseLine[], k: number) {
+  const opening = (v: VerseLine) => norm(v.words.slice(0, 8).join(""));
+  let n = Math.min(2, vs[k].words.length);
+  const clash = () => {
+    const mine = norm(vs[k].words.slice(0, n).join(""));
+    return vs.some((v, j) => j !== k && opening(v).startsWith(mine));
+  };
+  while (n < Math.min(6, vs[k].words.length) && clash()) n++;
+  return n;
+}
+
+function seamQ(p: DrillPassage, vs: VerseLine[], i: number, rng: Rng): Question | null {
+  if (vs.length < 2) return null;
+  let k = verseAt(vs, i);
+  if (k === 0) k = 1 + randInt(rng, vs.length - 1);
+  const v = vs[k];
+  const n = distinctStart(vs, k);
+  const right = v.words.slice(0, n).join(" ");
+  const seen = new Set([norm(right)]);
+  const add = (s: string, out: string[]) => { const x = norm(s); if (x && !seen.has(x)) { seen.add(x); out.push(s); } };
+  // Other verses' openings are what actually gets mixed up; ones sharing the first word most of all
+  const others: string[] = [];
+  const sameFirst = shuffle(rng, vs.filter((x, j) => j !== k && norm(x.words[0]) === norm(v.words[0])));
+  const rest = shuffle(rng, vs.filter((x, j) => j !== k && norm(x.words[0]) !== norm(v.words[0])));
+  for (const x of [...sameFirst, ...rest].slice(0, 2)) add(x.words.slice(0, n).join(" "), others);
+  for (const w of wrongVersions(v.words.slice(0, n), 3, rng)) add(w.join(" "), others);
+  return finish({
+    kind: "seam", passageId: p.id, prompt: "다음 절은 어떻게 시작하나요?",
+    context: { before: tail(vs[k - 1].words, 6), after: "", blank: false },
+    words: v.words.slice(0, n).map((_, j) => v.start + j),
+    reveal: tail(vs[k - 1].words, 6) + "\n" + v.words.slice(0, n + 3).join(" ") + (v.words.length > n + 3 ? " …" : ""),
+  }, right, others.slice(0, 3), rng);
+}
+
 const KIND_WEIGHT: { item: QuizKind; w: number }[] = [
   { item: "blank", w: 4 }, { item: "exact", w: 3 }, { item: "wrong", w: 3 }, { item: "next", w: 3 }, { item: "first", w: 1 }, { item: "ref", w: 1 },
 ];
+/** A whole chapter falls apart at verse order, piece order and verse seams: about half the questions. */
+function kindWeights(verses: number): { item: QuizKind; w: number }[] {
+  const big = verses >= 4;
+  return [
+    ...KIND_WEIGHT,
+    { item: "chunkOrder", w: big ? 4 : 2 },
+    ...(verses >= 2 ? [{ item: "seam" as const, w: big ? 4 : 2 }] : []),
+    ...(verses >= 3 ? [{ item: "verseOrder" as const, w: big ? 4 : 1 }] : []),
+  ];
+}
 
 /** One question about passage `p`, optionally aimed at word `focus` (a word I just missed). */
 export function makeQuestion(p: DrillPassage, all: DrillPassage[], rng: Rng, focus?: number, kind?: QuizKind): Question | null {
-  const words = tokenize(p.body);
+  const vs = splitVerses(p.body);
+  const words = vs.flatMap((v) => v.words);
   if (!words.length) return null;
+  const kinds = kindWeights(vs.length);
   for (let tries = 0; tries < 8; tries++) {
-    const k = (tries === 0 && kind) || weighted(rng, KIND_WEIGHT)!;
+    const k = (tries === 0 && kind) || weighted(rng, kinds)!;
     const i = focus !== undefined && focus < words.length && tries < 4 ? focus : pickWord(p, rng, words);
     const q =
       k === "blank" ? blankQ(p, words, i, rng)
@@ -393,10 +606,27 @@ export function makeQuestion(p: DrillPassage, all: DrillPassage[], rng: Rng, foc
       : k === "next" ? nextQ(p, words, i, rng)
       : k === "wrong" ? wrongWordQ(p, words, i, rng)
       : k === "first" ? firstQ(p, words, rng)
+      : k === "verseOrder" ? verseOrderQ(p, vs, i, rng)
+      : k === "chunkOrder" ? chunkOrderQ(p, vs, i, rng)
+      : k === "seam" ? seamQ(p, vs, i, rng)
       : refQ(p, words, i, all, rng);
     if (q) return q;
   }
   return null;
+}
+
+/**
+ * Verses `from`..`to` (positions, inclusive) as a passage of their own, for drilling one stretch.
+ * Word positions in it are `offset` less than in the whole passage.
+ */
+export function subPassage<T extends DrillPassage>(p: T, from: number, to: number): { passage: T; offset: number } {
+  const vs = splitVerses(p.body).slice(from, to + 1);
+  if (!vs.length) return { passage: p, offset: 0 };
+  const offset = vs[0].start;
+  const end = offset + vs.reduce((s, v) => s + v.words.length, 0);
+  const misses: Record<string, number> = {};
+  for (const [k, n] of Object.entries(p.misses)) if (+k >= offset && +k < end) misses[+k - offset] = n;
+  return { passage: { ...p, body: vs.map((v) => `${v.n} ${v.words.join(" ")}`).join("\n"), misses }, offset };
 }
 
 /** Passages I get wrong more often, and ones I haven't drilled yet, come up more. */
@@ -432,17 +662,23 @@ export interface Grade {
   wrongWords: number[];
   total: number;
   perfect: boolean;
+  /** Mistakes per verse (verse number as typed, or its position). */
+  byVerse: { n: number; words: number; wrong: number }[];
 }
 
 /**
  * Compares what I wrote from memory with the passage, letter by letter.
  * Spacing and punctuation are ignored; every other letter counts.
+ * Verse numbers I write along are ignored too (unless the text itself has digits).
  */
 export function gradeRecitation(body: string, attempt: string): Grade {
-  const words = tokenize(body);
+  const vs = splitVerses(body);
+  const words = vs.flatMap((v) => v.words);
+  const verseStarts = new Set(vs.slice(1).map((v) => v.start));
   const orig: { ch: string; w: number }[] = [];
   words.forEach((w, i) => { for (const ch of norm(w)) orig.push({ ch, w: i }); });
-  const mine = [...norm(attempt)];
+  const hasDigits = orig.some((o) => /\d/.test(o.ch));
+  const mine = [...norm(hasDigits ? attempt : attempt.replace(/\d/g, ""))];
   const a = orig.map((o) => o.ch);
   const n = a.length;
   const m = mine.length;
@@ -465,7 +701,7 @@ export function gradeRecitation(body: string, attempt: string): Grade {
     else parts.push({ type, text });
   };
   const origChar = (i: number, type: "same" | "missing") => {
-    if (lastWord >= 0 && orig[i].w !== lastWord) push("same", " ");
+    if (lastWord >= 0 && orig[i].w !== lastWord) push("same", verseStarts.has(orig[i].w) ? "\n" : " ");
     lastWord = orig[i].w;
     push(type, orig[i].ch);
   };
@@ -479,5 +715,9 @@ export function gradeRecitation(body: string, attempt: string): Grade {
     } else { wrong.add(orig[i].w); origChar(i, "missing"); i++; }
   }
   const wrongWords = [...wrong].filter((w) => w >= 0 && w < words.length).sort((x, y) => x - y);
-  return { parts, wrongWords, total: words.length, perfect: n > 0 && wrongWords.length === 0 };
+  const byVerse = vs.map((v) => ({
+    n: v.n, words: v.words.length,
+    wrong: wrongWords.filter((w) => w >= v.start && w < v.start + v.words.length).length,
+  }));
+  return { parts, wrongWords, total: words.length, perfect: n > 0 && wrongWords.length === 0, byVerse };
 }

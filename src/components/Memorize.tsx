@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { repo } from "../data";
 import type { MemoryPassage } from "../data/types";
 import {
-  KIND_LABEL, applyResult, gradeRecitation, makeQuestion, pickPassage, tokenize, type Grade, type Question,
+  KIND_LABEL, applyResult, gradeRecitation, makeQuestion, norm, pickPassage, splitVerses, subPassage, tokenize,
+  type Grade, type Question, type VerseLine,
 } from "../lib/memorize";
 import { useToast } from "../lib/toast";
 
@@ -60,6 +61,8 @@ export function MemorizeView({ mode, active, onMode }: ViewProps) {
 // ---------------------------------------------------------------- drill
 
 interface Retry { passageId: string; word?: number; due: number }
+/** Which passages to drill: all, one, or a stretch of one passage's verses (positions, inclusive). */
+interface Range { id: string; from: number; to: number }
 
 function useRecord(onPatch: (id: string, f: (p: MemoryPassage) => MemoryPassage) => void) {
   const toast = useToast();
@@ -69,21 +72,31 @@ function useRecord(onPatch: (id: string, f: (p: MemoryPassage) => MemoryPassage)
   }, [onPatch, toast]);
 }
 
+const isOrder = (q: Question) => !!q.order;
+
 function Drill({ passages, active, onPatch }: {
   passages: MemoryPassage[]; active: boolean; onPatch(id: string, f: (p: MemoryPassage) => MemoryPassage): void;
 }) {
-  const [filter, setFilter] = useState("all");
+  const [range, setRange] = useState<Range>({ id: "all", from: 0, to: 0 });
   const [q, setQ] = useState<Question | null>(null);
+  /** Word positions in `q` are this much less than in the stored passage (when drilling a stretch). */
+  const [offset, setOffset] = useState(0);
   const [picked, setPicked] = useState<number | null>(null);
+  const [tapped, setTapped] = useState<number[]>([]);
+  const [wrongTap, setWrongTap] = useState<number | null>(null);
+  const [outcome, setOutcome] = useState<boolean | null>(null);
   const [stats, setStats] = useState({ asked: 0, right: 0, streak: 0 });
   const retries = useRef<Retry[]>([]);
   const timer = useRef<number>(undefined);
   const record = useRecord(onPatch);
 
-  const pool = useMemo(
-    () => (filter === "all" ? passages : passages.filter((p) => p.id === filter)),
-    [passages, filter],
-  );
+  const one = passages.find((p) => p.id === range.id);
+  const verses = useMemo(() => (one ? splitVerses(one.body) : []), [one?.body]);
+  const pool = useMemo(() => {
+    if (!one) return passages.map((p) => ({ passage: p, offset: 0 }));
+    const whole = range.from === 0 && range.to >= verses.length - 1;
+    return [whole ? { passage: one, offset: 0 } : subPassage(one, range.from, range.to)];
+  }, [passages, one, range.from, range.to, verses.length]);
   // Pick from the latest stats, but don't regenerate the question when only the stats change
   const poolRef = useRef(pool);
   poolRef.current = pool;
@@ -91,50 +104,83 @@ function Drill({ passages, active, onPatch }: {
   const next = useCallback((asked: number) => {
     window.clearTimeout(timer.current);
     const ps = poolRef.current;
-    const due = retries.current.findIndex((r) => r.due <= asked && ps.some((p) => p.id === r.passageId));
-    let q: Question | null = null;
+    const all = ps.map((x) => x.passage);
+    const due = retries.current.findIndex((r) => r.due <= asked && ps.some((x) => x.passage.id === r.passageId));
+    let made: { q: Question; offset: number } | null = null;
     if (due >= 0) {
       const [r] = retries.current.splice(due, 1);
-      q = makeQuestion(ps.find((p) => p.id === r.passageId)!, passages, Math.random, r.word);
+      const x = ps.find((y) => y.passage.id === r.passageId)!;
+      const q = makeQuestion(x.passage, all, Math.random, r.word);
+      if (q) made = { q, offset: x.offset };
     }
-    for (let tries = 0; !q && tries < 5; tries++) {
-      const p = pickPassage(ps, Math.random);
-      if (p) q = makeQuestion(p, passages, Math.random);
+    for (let tries = 0; !made && tries < 5; tries++) {
+      const p = pickPassage(all, Math.random);
+      const x = p && ps.find((y) => y.passage === p);
+      const q = x && makeQuestion(x.passage, all, Math.random);
+      if (q) made = { q, offset: x.offset };
     }
-    setQ(q);
+    setQ(made?.q ?? null);
+    setOffset(made?.offset ?? 0);
     setPicked(null);
-  }, [passages]);
+    setTapped([]);
+    setWrongTap(null);
+    setOutcome(null);
+  }, []);
 
-  // A new question only when the range changes (stats updates also change `next`)
-  useEffect(() => { retries.current = []; next(0); }, [filter]);
+  // A new question only when the range changes (stats updates also change the pool)
+  useEffect(() => { retries.current = []; next(0); }, [range, next]);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
-  const answer = useCallback((i: number) => {
-    if (!q || picked !== null) return;
-    const ok = i === q.answer;
-    setPicked(i);
+  const finish = useCallback((ok: boolean, hit: number[], miss: number[]) => {
+    if (!q) return;
+    setOutcome(ok);
     const asked = stats.asked + 1;
     setStats((s) => ({ asked: s.asked + 1, right: s.right + (ok ? 1 : 0), streak: ok ? s.streak + 1 : 0 }));
-    record(q.passageId, ok, ok ? q.words : [], ok ? [] : q.words);
+    record(q.passageId, ok, hit.map((w) => w + offset), miss.map((w) => w + offset));
     if (ok) timer.current = window.setTimeout(() => next(asked), 900);
-    // Missed it: the same word comes back in a different form a few questions later
-    else retries.current.push({ passageId: q.passageId, word: q.words[0], due: asked + 3 });
-  }, [q, picked, stats.asked, record, next]);
+    // Missed it: the same spot comes back in a different form a few questions later
+    else retries.current.push({ passageId: q.passageId, word: miss[0] ?? q.words[0], due: asked + 3 });
+  }, [q, stats.asked, record, next, offset]);
+
+  const answer = useCallback((i: number) => {
+    if (!q || outcome !== null) return;
+    if (!q.order) {
+      setPicked(i);
+      const ok = i === q.answer;
+      finish(ok, ok ? q.words : [], ok ? [] : q.words);
+      return;
+    }
+    if (tapped.includes(i)) return;
+    const want = q.order.sequence[tapped.length];
+    // Two identical pieces are interchangeable
+    if (i === want || norm(q.choices[i]) === norm(q.choices[want])) {
+      const t = [...tapped, i];
+      setTapped(t);
+      if (t.length === q.choices.length) finish(true, q.words, []);
+    } else {
+      setWrongTap(i);
+      finish(false, tapped.map((c) => q.order!.firstWord[c]), [q.order.firstWord[want]]);
+    }
+  }, [q, outcome, tapped, finish]);
 
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-      if (picked === null && q && q.kind !== "wrong" && /^[1-9]$/.test(e.key) && Number(e.key) <= q.choices.length) answer(Number(e.key) - 1);
-      else if (picked !== null && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); next(stats.asked); }
+      if (outcome === null && q && q.kind !== "wrong" && /^[1-9]$/.test(e.key) && Number(e.key) <= q.choices.length) answer(Number(e.key) - 1);
+      else if (outcome !== null && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); next(stats.asked); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, picked, q, answer, next, stats.asked]);
+  }, [active, outcome, q, answer, next, stats.asked]);
 
   const p = q && passages.find((x) => x.id === q.passageId);
-  const ok = picked !== null && q && picked === q.answer;
   const pct = stats.asked ? Math.round((100 * stats.right) / stats.asked) : 0;
+  const choiceClass = (i: number) => {
+    if (!q || outcome === null) return "";
+    if (q.order) return i === wrongTap ? " wrong" : "";
+    return i === q.answer ? " right" : i === picked ? " wrong" : "";
+  };
 
   return (
     <div className="drill">
@@ -142,10 +188,30 @@ function Drill({ passages, active, onPatch }: {
         <p className="drill-stats" aria-live="polite">
           <b>{stats.asked}</b>문제 · 정답 <b>{stats.right}</b>{stats.asked > 0 && ` (${pct}%)`} · 연속 <b>{stats.streak}</b>
         </p>
-        <select className="ver" aria-label="문제 범위" value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="all">전체 본문 ({passages.length})</option>
-          {passages.map((x) => <option key={x.id} value={x.id}>{x.ref}</option>)}
-        </select>
+        <div className="range">
+          <select
+            className="ver" aria-label="문제 범위" value={range.id}
+            onChange={(e) => {
+              const x = passages.find((y) => y.id === e.target.value);
+              setRange({ id: e.target.value, from: 0, to: x ? splitVerses(x.body).length - 1 : 0 });
+            }}
+          >
+            <option value="all">전체 본문 ({passages.length})</option>
+            {passages.map((x) => <option key={x.id} value={x.id}>{x.ref}</option>)}
+          </select>
+          {one && verses.length >= 3 && (
+            <span className="range-verses">
+              <select className="ver" aria-label="구간 시작" value={range.from} onChange={(e) => { const f = +e.target.value; setRange((r) => ({ ...r, from: f, to: Math.max(f, r.to) })); }}>
+                {verses.map((v, i) => <option key={i} value={i}>{v.n}</option>)}
+              </select>
+              ~
+              <select className="ver" aria-label="구간 끝" value={range.to} onChange={(e) => { const t = +e.target.value; setRange((r) => ({ ...r, to: t, from: Math.min(t, r.from) })); }}>
+                {verses.map((v, i) => <option key={i} value={i}>{v.n}</option>)}
+              </select>
+              절
+            </span>
+          )}
+        </div>
       </div>
 
       {!q ? (
@@ -159,35 +225,41 @@ function Drill({ passages, active, onPatch }: {
           <h2 className="quiz-prompt">{q.prompt}</h2>
 
           {q.context && (
-            <p className="vtext quiz-context">
+            <p className={"vtext quiz-context" + (isOrder(q) || q.kind === "seam" ? " anchor" : "")}>
               {q.context.before}
               {q.context.blank && (
-                <span className={"blank" + (picked !== null ? " filled" : "")}>
-                  {picked !== null ? q.choices[q.answer] : "　　　"}
+                <span className={"blank" + (outcome !== null ? " filled" : "")}>
+                  {outcome !== null ? q.choices[q.answer] : "　　　"}
                 </span>
               )}
               {q.context.after}
-              {!q.context.blank && q.kind === "next" && <span className="blank">　…　</span>}
+              {!q.context.blank && (q.kind === "next" || q.kind === "seam") && <span className="blank">　…　</span>}
             </p>
+          )}
+
+          {q.order && (
+            <ol className="order-slots" aria-label="고른 순서">
+              {q.choices.map((_, k) => (
+                <li key={k} className={tapped[k] !== undefined ? "filled" : ""}>
+                  {tapped[k] !== undefined ? <span className="vtext">{q.choices[tapped[k]]}</span> : <span className="slot-num">{k + 1}</span>}
+                </li>
+              ))}
+            </ol>
           )}
 
           {q.kind === "wrong" ? (
             <p className="vtext word-pick">
               {q.choices.map((w, i) => (
-                <button
-                  key={i} type="button" disabled={picked !== null}
-                  className={picked === null ? "" : i === q.answer ? "right" : i === picked ? "wrong" : ""}
-                  onClick={() => answer(i)}
-                >{w}</button>
+                <button key={i} type="button" disabled={outcome !== null} className={choiceClass(i).trim()} onClick={() => answer(i)}>{w}</button>
               ))}
             </p>
           ) : (
-            <ol className="choices">
+            <ol className={"choices" + (q.order ? " pieces" : "")}>
               {q.choices.map((c, i) => (
                 <li key={i}>
                   <button
-                    type="button" disabled={picked !== null}
-                    className={"choice" + (picked === null ? "" : i === q.answer ? " right" : i === picked ? " wrong" : "")}
+                    type="button" disabled={outcome !== null || tapped.includes(i)}
+                    className={"choice" + choiceClass(i) + (tapped.includes(i) ? " used" : "")}
                     onClick={() => answer(i)}
                   >
                     <span className="choice-num" aria-hidden>{i + 1}</span>
@@ -198,33 +270,86 @@ function Drill({ passages, active, onPatch }: {
             </ol>
           )}
 
-          {picked !== null && (
-            <div className={"feedback " + (ok ? "ok" : "no")} role="status">
-              <p className="feedback-title">{ok ? "정답" : "오답 · 곧 다시 나옵니다"}</p>
-              {!ok && <p className="vtext reveal">{q.reveal}</p>}
+          {outcome !== null && (
+            <div className={"feedback " + (outcome ? "ok" : "no")} role="status">
+              <p className="feedback-title">{outcome ? "정답" : "오답 · 곧 다시 나옵니다"}</p>
+              {!outcome && <p className="vtext reveal">{q.reveal}</p>}
               <button type="button" className="btn-primary" onClick={() => next(stats.asked)}>다음 문제</button>
             </div>
           )}
         </section>
       )}
-      <p className="sub hint">숫자 키 1–4로 고르고 Enter로 넘어갑니다. 맞히면 자동으로 다음 문제로 갑니다.</p>
+      <p className="sub hint">숫자 키로 고르고 Enter로 넘어갑니다. 순서 문제는 맞는 순서대로 누르세요. 맞히면 자동으로 다음 문제로 갑니다.</p>
     </div>
   );
 }
 
 // ---------------------------------------------------------------- write from memory
 
+const initialsOf = (ws: string[]) => ws.map((w) => w[0] + "○".repeat(Math.max(0, [...w].length - 1))).join(" ");
+
+function DiffView({ grade }: { grade: Grade }) {
+  return (
+    <>
+      <p className="vtext diff">
+        {grade.parts.map((x, i) =>
+          x.type === "same" ? <span key={i}>{x.text}</span>
+          : x.type === "missing" ? <ins key={i} title="빠졌거나 틀린 글자">{x.text}</ins>
+          : <del key={i} title="본문에 없는 글자">{x.text}</del>)}
+      </p>
+      <p className="sub legend"><ins>본문 글자</ins> 빠뜨리거나 틀린 곳 · <del>쓴 글자</del> 본문에 없는 것</p>
+    </>
+  );
+}
+
+function VerseChips({ items }: { items: { n: number; wrong: number }[] }) {
+  return (
+    <p className="verse-chips" aria-label="절별 결과">
+      {items.map((v, i) => (
+        <span key={i} className={"vchip" + (v.wrong ? " bad" : "")} title={v.wrong ? `${v.wrong}어절 다름` : "정확"}>
+          {v.n}{v.wrong ? ` ✗${v.wrong}` : " ✓"}
+        </span>
+      ))}
+    </p>
+  );
+}
+
 function WriteOut({ passages, onPatch }: {
   passages: MemoryPassage[]; onPatch(id: string, f: (p: MemoryPassage) => MemoryPassage): void;
 }) {
   const [id, setId] = useState(passages[0].id);
+  const [byVerse, setByVerse] = useState(false);
+  const p = passages.find((x) => x.id === id) ?? passages[0];
+  const verses = useMemo(() => splitVerses(p.body), [p.body]);
+  const record = useRecord(onPatch);
+
+  return (
+    <div className="drill">
+      <div className="drill-head">
+        <select className="ver" aria-label="외울 본문" value={p.id} onChange={(e) => setId(e.target.value)}>
+          {passages.map((x) => <option key={x.id} value={x.id}>{x.ref}</option>)}
+        </select>
+        {verses.length >= 2 && (
+          <div className="seg" role="group" aria-label="쓰기 방식">
+            <button type="button" aria-pressed={!byVerse} onClick={() => setByVerse(false)}>통으로</button>
+            <button type="button" aria-pressed={byVerse} onClick={() => setByVerse(true)}>한 절씩</button>
+          </div>
+        )}
+      </div>
+      {byVerse && verses.length >= 2
+        ? <VerseByVerse key={p.id} p={p} verses={verses} record={record} />
+        : <Whole key={p.id} p={p} verses={verses} record={record} />}
+    </div>
+  );
+}
+
+type RecordFn = (id: string, ok: boolean, hit: number[], miss: number[]) => void;
+
+function Whole({ p, verses, record }: { p: MemoryPassage; verses: VerseLine[]; record: RecordFn }) {
   const [text, setText] = useState("");
   const [grade, setGrade] = useState<Grade | null>(null);
   const [initials, setInitials] = useState(false);
-  const record = useRecord(onPatch);
-  const p = passages.find((x) => x.id === id) ?? passages[0];
 
-  const choose = (v: string) => { setId(v); setText(""); setGrade(null); };
   const check = (e: FormEvent) => {
     e.preventDefault();
     if (!text.trim()) return;
@@ -237,15 +362,13 @@ function WriteOut({ passages, onPatch }: {
   return (
     <form className="card write" onSubmit={check} aria-label="외워 쓰기">
       <div className="card-top">
-        <select className="ver" aria-label="외울 본문" value={p.id} onChange={(e) => choose(e.target.value)}>
-          {passages.map((x) => <option key={x.id} value={x.id}>{x.ref}</option>)}
-        </select>
+        <h3 className="ref">{p.ref}</h3>
         <button type="button" className="ghost" aria-pressed={initials} onClick={() => setInitials((v) => !v)}>첫 글자 힌트</button>
       </div>
-      {initials && <p className="vtext initials">{tokenize(p.body).map((w) => w[0] + "○".repeat(Math.max(0, [...w].length - 1))).join(" ")}</p>}
-      <label className="sub" htmlFor="recite">{p.ref}을(를) 외운 대로 쓰세요. 띄어쓰기와 문장부호는 채점하지 않습니다.</label>
+      {initials && <p className="vtext initials">{verses.map((v) => initialsOf(v.words)).join("\n")}</p>}
+      <label className="sub" htmlFor="recite">{p.ref}을(를) 외운 대로 쓰세요. 띄어쓰기·문장부호·절 번호는 채점하지 않습니다.</label>
       <textarea
-        id="recite" className="recite" value={text} rows={6}
+        id="recite" className="recite" value={text} rows={Math.min(14, Math.max(6, verses.length + 2))}
         onChange={(e) => { setText(e.target.value); setGrade(null); }}
         autoComplete="off" autoCorrect="off" spellCheck={false}
       />
@@ -258,19 +381,91 @@ function WriteOut({ passages, onPatch }: {
           <p className="feedback-title">
             {grade.perfect ? "토씨 하나 틀리지 않았습니다" : `${grade.total}어절 중 ${grade.wrongWords.length}어절이 다릅니다`}
           </p>
-          {!grade.perfect && (
-            <>
-              <p className="vtext diff">
-                {grade.parts.map((x, i) =>
-                  x.type === "same" ? <span key={i}>{x.text}</span>
-                  : x.type === "missing" ? <ins key={i} title="빠졌거나 틀린 글자">{x.text}</ins>
-                  : <del key={i} title="본문에 없는 글자">{x.text}</del>)}
-              </p>
-              <p className="sub legend"><ins>본문 글자</ins> 빠뜨리거나 틀린 곳 · <del>쓴 글자</del> 본문에 없는 것</p>
-            </>
-          )}
+          {verses.length >= 2 && <VerseChips items={grade.byVerse} />}
+          {!grade.perfect && <DiffView grade={grade} />}
         </div>
       )}
+    </form>
+  );
+}
+
+/** One verse at a time: write it, see it graded at once, go on. Good for a long chapter on a phone. */
+function VerseByVerse({ p, verses, record }: { p: MemoryPassage; verses: VerseLine[]; record: RecordFn }) {
+  const [k, setK] = useState(0);
+  const [text, setText] = useState("");
+  const [grade, setGrade] = useState<Grade | null>(null);
+  const [done, setDone] = useState<{ n: number; wrong: number }[]>([]);
+  const [initials, setInitials] = useState(false);
+  const box = useRef<HTMLTextAreaElement>(null);
+  const v = verses[k];
+
+  const restart = (from: number) => { setK(from); setText(""); setGrade(null); setDone([]); };
+  const advance = (g: Grade) => {
+    setDone((d) => [...d, { n: v.n, wrong: g.wrongWords.length }]);
+    setK((x) => x + 1);
+    setText("");
+    setGrade(null);
+    box.current?.focus();
+  };
+  const check = (e?: FormEvent) => {
+    e?.preventDefault();
+    if (!text.trim() || !v) return;
+    if (grade) { advance(grade); return; }
+    const g = gradeRecitation(v.words.join(" "), text);
+    const wrong = new Set(g.wrongWords);
+    record(p.id, g.perfect, v.words.map((_, i) => i).filter((i) => !wrong.has(i)).map((i) => i + v.start), g.wrongWords.map((i) => i + v.start));
+    if (g.perfect) advance(g);
+    else setGrade(g);
+  };
+
+  if (!v) {
+    const right = done.filter((d) => !d.wrong).length;
+    return (
+      <div className="card write">
+        <div className={"feedback " + (right === done.length ? "ok" : "no")} role="status">
+          <p className="feedback-title">{done.length}절 중 {right}절을 토씨 하나 틀리지 않고 썼습니다</p>
+          <VerseChips items={done} />
+          <button type="button" className="btn-primary" onClick={() => restart(0)}>처음부터 다시</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <form className="card write" onSubmit={check} aria-label="한 절씩 쓰기">
+      <div className="card-top">
+        <h3 className="ref">{p.ref}</h3>
+        <span className="score">{k + 1} / {verses.length}</span>
+      </div>
+      {done.length > 0 && <VerseChips items={done} />}
+      <div className="card-top">
+        <label className="sub">
+          시작{" "}
+          <select className="ver" aria-label="시작 절" value={k} onChange={(e) => restart(+e.target.value)}>
+            {verses.map((x, i) => <option key={i} value={i}>{x.n}</option>)}
+          </select>
+        </label>
+        <button type="button" className="ghost" aria-pressed={initials} onClick={() => setInitials((x) => !x)}>첫 글자 힌트</button>
+      </div>
+      {k > 0 && <p className="vtext quiz-context anchor">{(verses[k - 1].words.length > 6 ? "… " : "") + verses[k - 1].words.slice(-6).join(" ")}</p>}
+      {initials && <p className="vtext initials">{initialsOf(v.words)}</p>}
+      <label className="sub" htmlFor="recite-verse">이어지는 절을 쓰고 Enter</label>
+      <textarea
+        id="recite-verse" ref={box} className="recite" value={text} rows={3}
+        onChange={(e) => { if (!grade) setText(e.target.value); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); check(); } }}
+        readOnly={!!grade} autoComplete="off" autoCorrect="off" spellCheck={false}
+      />
+      {grade && (
+        <div className="feedback no" role="status">
+          <p className="feedback-title">{grade.total}어절 중 {grade.wrongWords.length}어절이 다릅니다</p>
+          <DiffView grade={grade} />
+        </div>
+      )}
+      <div className="card-actions">
+        {grade && <button type="button" className="ghost" onClick={() => { setGrade(null); setText(""); box.current?.focus(); }}>이 절 다시</button>}
+        <button type="submit" className="btn-primary" disabled={!text.trim()}>{grade ? "다음 절" : "채점"}</button>
+      </div>
     </form>
   );
 }
@@ -319,7 +514,11 @@ function Manage({ passages, onChange }: { passages: MemoryPassage[]; onChange():
         <label className="sub" htmlFor="memo-ref">장절</label>
         <input id="memo-ref" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="예: 빌립보서 4:6-7" maxLength={100} />
         <label className="sub" htmlFor="memo-body">본문</label>
-        <textarea id="memo-body" value={body} onChange={(e) => setBody(e.target.value)} rows={5} maxLength={5000} placeholder="외울 본문을 그대로 입력하세요" />
+        <textarea
+          id="memo-body" value={body} onChange={(e) => setBody(e.target.value)} rows={8} maxLength={5000}
+          placeholder={"한 줄에 한 절. 절 번호는 있어도 없어도 됩니다\n1   내 아들아 …\n2   그리하면 …"}
+        />
+        {body.trim() && <VersePreview body={body} />}
         {editing && <p className="sub">본문을 바꾸면 이 본문의 약한 어절 기록이 처음부터 다시 쌓입니다.</p>}
         <div className="card-actions">
           {editing && <button type="button" className="ghost" onClick={reset}>취소</button>}
@@ -342,7 +541,8 @@ function Manage({ passages, onChange }: { passages: MemoryPassage[]; onChange():
               <h3 className="ref">{x.ref}</h3>
               <span className="score">{seen ? `${seen}회 · 정답률 ${Math.round((100 * x.correct) / seen)}%` : "아직 안 풀어 봄"}</span>
             </div>
-            <p className="vtext memo-body">{x.body}</p>
+            <p className="vtext memo-body">{splitVerses(x.body).map((v) => v.words.join(" ")).join("\n")}</p>
+            <VerseBar p={x} />
             {weak.length > 0 && (
               <div className="tags" aria-label="자주 틀리는 어절">
                 <span className="sub">자주 틀림</span>
@@ -363,6 +563,38 @@ function Manage({ passages, onChange }: { passages: MemoryPassage[]; onChange():
           </article>
         );
       })}
+    </div>
+  );
+}
+
+/** How the text will be split into verses, before saving: a wrong split shows up right away. */
+function VersePreview({ body }: { body: string }) {
+  const vs = splitVerses(body);
+  if (vs.length < 2) return <p className="sub">한 덩어리로 저장합니다. 절 순서 문제를 풀려면 한 줄에 한 절씩 넣으세요.</p>;
+  return (
+    <div className="preview">
+      <p className="sub"><b>{vs.length}절</b>로 나눴습니다 · {vs.reduce((s, v) => s + v.words.length, 0)}어절</p>
+      <ol>
+        {vs.map((v, i) => <li key={i}><span className="vnum-sm">{v.n}</span> {v.words.slice(0, 6).join(" ")}{v.words.length > 6 ? " …" : ""}</li>)}
+      </ol>
+    </div>
+  );
+}
+
+/** One cell per verse, darker where I miss more. */
+function VerseBar({ p }: { p: MemoryPassage }) {
+  const vs = splitVerses(p.body);
+  if (vs.length < 2) return null;
+  const miss = vs.map((v) => {
+    let n = 0;
+    for (let i = v.start; i < v.start + v.words.length; i++) n += p.misses[i] ?? 0;
+    return n;
+  });
+  return (
+    <div className="verse-bar" role="img" aria-label={`절별로 틀린 횟수: ${vs.map((v, i) => `${v.n}절 ${miss[i]}`).join(", ")}`}>
+      {vs.map((v, i) => (
+        <span key={i} className={"cell" + (miss[i] >= 3 ? " bad" : miss[i] > 0 ? " weak" : "")} title={`${v.n}절 · 틀림 ${miss[i]}`} />
+      ))}
     </div>
   );
 }
